@@ -19,6 +19,12 @@
       justify-content: center;
       align-items: center;
       color: #1d1d1f;
+      transition: background 0.3s, color 0.3s;
+    }
+
+    body.dark-mode {
+      background: #0a0a0a;
+      color: #e5e5e7;
     }
 
     .container {
@@ -32,6 +38,12 @@
       flex-direction: column;
       overflow: hidden;
       position: relative;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+
+    body.dark-mode .container {
+      background: #1a1a1a;
+      box-shadow: 0 2px 20px rgba(0,0,0,0.5);
     }
 
     .header {
@@ -41,6 +53,12 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
+      transition: background 0.3s, border-color 0.3s;
+    }
+
+    body.dark-mode .header {
+      background: #1a1a1a;
+      border-bottom-color: #2a2a2a;
     }
 
     .header h1 {
@@ -48,12 +66,99 @@
       font-weight: 500;
       color: #1d1d1f;
       letter-spacing: -0.3px;
+      transition: color 0.3s;
+    }
+
+    body.dark-mode .header h1 {
+      color: #e5e5e7;
     }
 
     .header-controls {
       display: flex;
       gap: 12px;
       align-items: center;
+    }
+
+    .system-stats {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: #86868b;
+      padding: 6px 12px;
+      background: #f5f5f7;
+      border-radius: 8px;
+      transition: all 0.3s;
+    }
+
+    body.dark-mode .system-stats {
+      background: #2a2a2a;
+      color: #9ca3af;
+    }
+
+    .stat-item-small {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .stat-bar {
+      width: 40px;
+      height: 4px;
+      background: #e5e5e7;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    body.dark-mode .stat-bar {
+      background: #3a3a3a;
+    }
+
+    .stat-fill {
+      height: 100%;
+      transition: width 0.3s, background 0.3s;
+    }
+
+    .stat-fill.vram {
+      background: linear-gradient(90deg, #10b981, #34d399);
+    }
+
+    .stat-fill.ram {
+      background: linear-gradient(90deg, #667eea, #764ba2);
+    }
+
+    .stat-fill.high {
+      background: linear-gradient(90deg, #f59e0b, #f97316);
+    }
+
+    .stat-fill.critical {
+      background: linear-gradient(90deg, #ef4444, #dc2626);
+    }
+
+    .theme-toggle {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: #f5f5f7;
+      cursor: pointer;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s;
+    }
+
+    .theme-toggle:hover {
+      transform: scale(1.1);
+      background: #e8e8ed;
+    }
+
+    body.dark-mode .theme-toggle {
+      background: #2a2a2a;
+    }
+
+    body.dark-mode .theme-toggle:hover {
+      background: #3a3a3a;
     }
 
     .status {
@@ -106,6 +211,11 @@
       border-radius: 4px;
       font-family: 'Courier New', monospace;
       font-size: 14px;
+      transition: background 0.3s;
+    }
+
+    body.dark-mode .message-content code {
+      background: #2a2a2a;
     }
 
     .message-content pre {
@@ -114,6 +224,11 @@
       border-radius: 8px;
       overflow-x: auto;
       margin: 8px 0;
+      transition: background 0.3s;
+    }
+
+    body.dark-mode .message-content pre {
+      background: #2a2a2a;
     }
 
     .message-content pre code {
@@ -144,6 +259,13 @@
       background: white;
       color: #1d1d1f;
       border: 1px solid #e5e5e7;
+      transition: all 0.3s;
+    }
+
+    body.dark-mode .message.assistant .message-content {
+      background: #1a1a1a;
+      color: #e5e5e7;
+      border-color: #2a2a2a;
     }
 
     .input-container {
@@ -156,6 +278,12 @@
       flex-shrink: 0;
       z-index: 10;
       position: relative;
+      transition: all 0.3s;
+    }
+
+    body.dark-mode .input-container {
+      background: #1a1a1a;
+      border-top-color: #2a2a2a;
     }
 
     #messageInput {
@@ -165,13 +293,24 @@
       border-radius: 20px;
       font-size: 15px;
       outline: none;
-      transition: border-color 0.2s;
+      transition: all 0.2s;
       background: #fafafa;
+      color: #1d1d1f;
+    }
+
+    body.dark-mode #messageInput {
+      background: #0f0f0f;
+      border-color: #3a3a3a;
+      color: #e5e5e7;
     }
 
     #messageInput:focus {
       border-color: #007aff;
       background: white;
+    }
+
+    body.dark-mode #messageInput:focus {
+      background: #1a1a1a;
     }
 
     button {
@@ -188,6 +327,10 @@
 
     button:hover {
       background: #f5f5f7;
+    }
+
+    body.dark-mode button:hover {
+      background: #2a2a2a;
     }
 
     button:active {
@@ -276,6 +419,10 @@
       font-weight: 500;
     }
 
+    body.dark-mode .tab {
+      color: #9ca3af;
+    }
+
     .tab.active {
       color: #007aff;
       border-bottom-color: #007aff;
@@ -283,6 +430,10 @@
 
     .tab:hover {
       background: #fafafa;
+    }
+
+    body.dark-mode .tab:hover {
+      background: #2a2a2a;
     }
 
     .content-area {
@@ -400,6 +551,124 @@
     .form-group input:focus {
       border-color: #007aff;
     }
+    /* Mode sombre pour l'onglet Mémoire */
+    body.dark-mode #memoryTab {
+      background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+    }
+
+    body.dark-mode .memory-header {
+      background: #1a1a1a;
+      border-bottom-color: #2a2a2a;
+    }
+
+    body.dark-mode .memory-title {
+      color: #e5e5e7;
+    }
+
+    body.dark-mode .memory-subtitle {
+      color: #9ca3af;
+    }
+
+    body.dark-mode .stat-card {
+      background: #1a1a1a;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    body.dark-mode .stat-card:hover {
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+
+    body.dark-mode .stat-label {
+      color: #9ca3af;
+    }
+
+    body.dark-mode .add-section {
+      background: #1a1a1a;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+
+    body.dark-mode .add-title {
+      color: #e5e5e7;
+    }
+
+    body.dark-mode .triplet-input-label {
+      color: #9ca3af;
+    }
+
+    body.dark-mode .triplet-input {
+      background: #0f0f0f;
+      border-color: #3a3a3a;
+      color: #e5e5e7;
+    }
+
+    body.dark-mode .triplet-input:focus {
+      background: #1a1a1a;
+    }
+
+    body.dark-mode .search-input {
+      background: #1a1a1a;
+      border-color: #3a3a3a;
+      color: #e5e5e7;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    body.dark-mode .search-icon {
+      color: #6b7280;
+    }
+
+    body.dark-mode .triplet-card {
+      background: #1a1a1a;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      border-color: transparent;
+    }
+
+    body.dark-mode .triplet-card:hover {
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+
+    body.dark-mode .node-value {
+      color: #e5e5e7;
+    }
+
+    body.dark-mode .node-subject .node-value {
+      color: #8b9aff;
+    }
+
+    body.dark-mode .node-relation .node-value {
+      color: #34d399;
+    }
+
+    body.dark-mode .node-object .node-value {
+      color: #fbbf24;
+    }
+
+    body.dark-mode .action-btn {
+      background: #2a2a2a;
+    }
+
+    body.dark-mode .btn-edit:hover {
+      background: #1e3a8a;
+      color: #60a5fa;
+    }
+
+    body.dark-mode .btn-delete:hover {
+      background: #7f1d1d;
+      color: #f87171;
+    }
+
+    body.dark-mode .empty-title {
+      color: #e5e5e7;
+    }
+
+    body.dark-mode .empty-text {
+      color: #9ca3af;
+    }
+
+    body.dark-mode .loading {
+      background: #1a1a1a;
+      border-top-color: #2a2a2a;
+      color: #9ca3af;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -408,6 +677,25 @@
     <div class="header">
       <h1>Lizzi</h1>
       <div class="header-controls">
+        <div class="system-stats" id="systemStats">
+          <div class="stat-item-small" title="VRAM utilisée">
+            <span>🎮</span>
+            <span id="vramText">-- MB</span>
+            <div class="stat-bar">
+              <div class="stat-fill vram" id="vramBar" style="width: 0%"></div>
+            </div>
+          </div>
+          <div class="stat-item-small" title="RAM utilisée">
+            <span>💾</span>
+            <span id="ramText">-- MB</span>
+            <div class="stat-bar">
+              <div class="stat-fill ram" id="ramBar" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+        <button class="theme-toggle" onclick="toggleTheme()" id="themeToggle" title="Changer de thème">
+          🌙
+        </button>
         <div class="speaking-indicator" id="speakingIndicator">● En train de parler</div>
         <span class="status" id="status">Prêt</span>
       </div>
@@ -486,8 +774,55 @@
         const response = await fetch(`${API_URL}/api/health`);
         const data = await response.json();
         document.getElementById('status').textContent = data.model;
+
+        // Lance le monitoring système
+        updateSystemStats();
+        setInterval(updateSystemStats, 5000); // Mise à jour toutes les 5 secondes
       } catch (error) {
         document.getElementById('status').textContent = 'Déconnecté';
+      }
+    }
+
+    async function updateSystemStats() {
+      try {
+        const response = await fetch(`${API_URL}/api/system/stats`);
+        const data = await response.json();
+
+        // VRAM
+        const vramUsed = data.stats.vram.used;
+        const vramTotal = data.stats.vram.total;
+        const vramPercentage = data.stats.vram.percentage;
+
+        if (vramTotal > 0) {
+          document.getElementById('vramText').textContent =
+            `${Math.round(vramUsed / 1024 * 10) / 10}/${Math.round(vramTotal / 1024 * 10) / 10} GB`;
+          const vramBar = document.getElementById('vramBar');
+          vramBar.style.width = `${vramPercentage}%`;
+
+          // Couleur selon l'usage
+          vramBar.className = 'stat-fill';
+          if (vramPercentage > 90) vramBar.classList.add('critical');
+          else if (vramPercentage > 75) vramBar.classList.add('high');
+          else vramBar.classList.add('vram');
+        }
+
+        // RAM
+        const ramUsed = data.stats.ram.used;
+        const ramTotal = data.stats.ram.total;
+        const ramPercentage = data.stats.ram.percentage;
+
+        document.getElementById('ramText').textContent =
+          `${Math.round(ramUsed / 1024 * 10) / 10}/${Math.round(ramTotal / 1024 * 10) / 10} GB`;
+        const ramBar = document.getElementById('ramBar');
+        ramBar.style.width = `${ramPercentage}%`;
+
+        ramBar.className = 'stat-fill';
+        if (ramPercentage > 90) ramBar.classList.add('critical');
+        else if (ramPercentage > 75) ramBar.classList.add('high');
+        else ramBar.classList.add('ram');
+
+      } catch (error) {
+        console.error('Erreur stats système:', error);
       }
     }
 
@@ -790,8 +1125,27 @@
       return div.innerHTML;
     }
 
+    function toggleTheme() {
+      document.body.classList.toggle('dark-mode');
+      const isDark = document.body.classList.contains('dark-mode');
+      document.getElementById('themeToggle').textContent = isDark ? '☀️' : '🌙';
+
+      // Sauvegarde la préférence
+      localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    }
+
+    // Charge le thème au démarrage
+    function loadTheme() {
+      const savedTheme = localStorage.getItem('theme');
+      if (savedTheme === 'dark') {
+        document.body.classList.add('dark-mode');
+        document.getElementById('themeToggle').textContent = '☀️';
+      }
+    }
+
     checkHealth();
     document.getElementById('messageInput').focus();
+    loadTheme();
   </script>
 </body>
 </html>

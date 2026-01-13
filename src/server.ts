@@ -5,9 +5,11 @@ import cors from 'cors';
 import { Assistant } from './core/assistant.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { SystemMonitor } from './core/system-monitor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const systemMonitor = new SystemMonitor();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -165,4 +167,18 @@ app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur http://localhost:${PORT}`);
   console.log(`📡 Connecté à Ollama sur ${process.env.OLLAMA_HOST}`);
   console.log(`🤖 Modèle: ${process.env.MODEL_NAME}`);
+});
+app.get('/api/system/stats', async (req, res) => {
+  try {
+    const stats = await systemMonitor.getStats();
+    const modelInfo = await systemMonitor.getModelInfo();
+
+    res.json({
+      stats,
+      model: modelInfo
+    });
+  } catch (error) {
+    console.error('Erreur stats système:', error);
+    res.status(500).json({ error: 'Erreur lors de la récupération des stats' });
+  }
 });
