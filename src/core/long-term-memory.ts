@@ -207,18 +207,25 @@ export class LongTermMemory {
   async search(query: string): Promise<Fact[]> {
     const lowerQuery = query.toLowerCase();
     
+    // Nettoyer les apostrophes et caractères spéciaux
+    const cleanQuery = lowerQuery
+      .replace(/['']/g, ' ') // d'animaux → d animaux
+      .replace(/[^\w\sàâäéèêëïîôùûüÿç-]/g, ' '); // autres caractères → espaces
+    
     // Extraire les mots significatifs (enlever mots vides)
     const stopWords = ['je', 'tu', 'il', 'elle', 'nous', 'vous', 'ils', 'elles',
-                       'le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'au',
+                       'le', 'la', 'les', 'un', 'une', 'des', 'de', 'd', 'du', 'au',
                        'mon', 'ma', 'mes', 'ton', 'ta', 'tes', 'son', 'sa', 'ses',
                        'quel', 'quelle', 'quels', 'quelles', 'que', 'qui', 'quoi',
                        'est', 'sont', 'suis', 'es', 'sommes', 'être', 'avoir',
-                       'a', 'ai', 'as', 'avons', 'avez', 'ont', '?', '.', '!', ',',
+                       'a', 'ai', 'as', 'avons', 'avez', 'ont',
                        'combien', 'nombre'];
     
-    let keywords = lowerQuery
+    let keywords = cleanQuery
       .split(/\s+/)
       .filter(word => word.length > 2 && !stopWords.includes(word));
+    
+    console.log(`🔎 Keywords extraits: [${keywords.join(', ')}]`);
     
     // Ajouter les singuliers/pluriels des mots-clés
     const expandedKeywords = new Set<string>();
@@ -240,6 +247,8 @@ export class LongTermMemory {
         expandedKeywords.add('poisson');
       }
     });
+    
+    console.log(`🔎 Expanded keywords: [${Array.from(expandedKeywords).slice(0, 10).join(', ')}...]`);
     
     if (expandedKeywords.size === 0) {
       return Array.from(this.facts.values());

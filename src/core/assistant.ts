@@ -174,7 +174,9 @@ export class Assistant {
     ];
 
     console.log('📤 Prompt système envoyé au LLM:');
-    console.log(messages[0].content.substring(0, 500) + '...');
+    console.log('='.repeat(80));
+    console.log(messages[0].content);
+    console.log('='.repeat(80));
     console.log(`📊 Contexte mémoire (${memoryContext.length} chars)`);
 
     try {
