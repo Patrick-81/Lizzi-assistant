@@ -1033,12 +1033,29 @@
       try {
         document.getElementById('speakingIndicator').classList.add('active');
 
+        // Nettoyer le texte pour la synthèse vocale
+        let cleanText = text;
+        
+        // Remplacer les blocs de code par "code ci-dessous"
+        cleanText = cleanText.replace(/```[\s\S]*?```/g, ' code ci-dessous. ');
+        cleanText = cleanText.replace(/`[^`]+`/g, ' code ');
+        
+        // Retirer les markdown restants
+        cleanText = cleanText.replace(/[*_#]/g, '');
+        
+        // Retirer "### User:" et autres artefacts
+        cleanText = cleanText.replace(/###\s*User\s*:?/gi, '');
+        cleanText = cleanText.replace(/###\s*Assistant\s*:?/gi, '');
+        
+        // Nettoyer espaces multiples
+        cleanText = cleanText.replace(/\s+/g, ' ').trim();
+
         const response = await fetch(`${API_URL}/api/speak`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ text })
+          body: JSON.stringify({ text: cleanText })
         });
 
         const data = await response.json();
