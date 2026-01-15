@@ -114,6 +114,16 @@ export class MemoryDetector {
         })
       },
 
+      // "j'ai une voiture Tesla" ou "j'ai un ordinateur MacBook" (TYPE MARQUE)
+      {
+        regex: new RegExp(`(?:${escapedKeywords}\\s+)?(?:que\\s+)?j'ai\\s+(?:un|une)\\s+(\\w+)\\s+([A-ZÀ-ÿ\\w-]+)`, 'i'),
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: `possède un ${m[1]}`,
+          object: m[2].trim()
+        })
+      },
+
       // "je déteste les épinards"
       {
         regex: /je déteste\s+(.+?)(?:\.|$)/i,
