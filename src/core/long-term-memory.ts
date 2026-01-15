@@ -206,13 +206,30 @@ export class LongTermMemory {
 
   async search(query: string): Promise<Fact[]> {
     const lowerQuery = query.toLowerCase();
+    
+    // Extraire les mots significatifs (enlever mots vides)
+    const stopWords = ['je', 'tu', 'il', 'elle', 'nous', 'vous', 'ils', 'elles',
+                       'le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'au',
+                       'mon', 'ma', 'mes', 'ton', 'ta', 'tes', 'son', 'sa', 'ses',
+                       'quel', 'quelle', 'quels', 'quelles', 'que', 'qui', 'quoi',
+                       'est', 'sont', 'suis', 'es', 'sommes', 'être', 'avoir',
+                       'a', 'ai', 'as', 'avons', 'avez', 'ont', '?', '.', '!', ','];
+    
+    const keywords = lowerQuery
+      .split(/\s+/)
+      .filter(word => word.length > 2 && !stopWords.includes(word));
+    
+    if (keywords.length === 0) {
+      return Array.from(this.facts.values());
+    }
+    
     return Array.from(this.facts.values()).filter(fact => {
       const predicate = fact.predicate || fact.key || '';
       const objectsStr = fact.objects.join(' ');
-
-      return fact.subject.toLowerCase().includes(lowerQuery) ||
-             predicate.toLowerCase().includes(lowerQuery) ||
-             objectsStr.toLowerCase().includes(lowerQuery);
+      const searchText = `${fact.subject} ${predicate} ${objectsStr}`.toLowerCase();
+      
+      // Retourne vrai si au moins un mot-clé est trouvé
+      return keywords.some(keyword => searchText.includes(keyword));
     });
   }
 

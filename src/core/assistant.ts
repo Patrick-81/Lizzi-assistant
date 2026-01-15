@@ -122,6 +122,9 @@ export class Assistant {
     const relevantMemories = await this.longTermMemory.search(userMessage);
     let memoryContext = '';
 
+    console.log(`🔍 Recherche "${userMessage}" → ${relevantMemories.length} souvenirs trouvés`);
+    relevantMemories.forEach(m => console.log(`  - ${m.subject} ${m.predicate}: ${m.objects.join(', ')}`));
+
     // Ajouter le nom de l'utilisateur en premier dans le contexte
     if (userName) {
       memoryContext = `\n\nCONTEXTE UTILISATEUR :\n- Tu parles avec ${userName}\n`;

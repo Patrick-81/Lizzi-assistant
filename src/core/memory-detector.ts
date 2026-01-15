@@ -17,7 +17,10 @@ export class MemoryDetector {
     'tu te souviens', 'te rappelles', 'qu\'est-ce que tu sais',
     'de quoi tu te souviens', 'qu\'as-tu retenu',
     'qu\'as-tu mémorisé', 'liste tes souvenirs',
-    'montre tes souvenirs', 'tes souvenirs'
+    'montre tes souvenirs', 'tes souvenirs', 'mes souvenirs',
+    'quels sont tes souvenirs', 'que sais-tu de moi',
+    'ce que tu sais sur moi', 'rappelle mes souvenirs',
+    'rappelle-moi mes souvenirs'
   ];
 
   shouldMemorize(text: string): boolean {
@@ -121,6 +124,26 @@ export class MemoryDetector {
           subject: detectedName || 'Utilisateur',
           predicate: `possède un ${m[1]}`,
           object: m[2].trim()
+        })
+      },
+
+      // "je possède un véhicule Tesla" ou "je possède une voiture Audi" (je possède TYPE MARQUE)
+      {
+        regex: new RegExp(`(?:${escapedKeywords}\\s+)?(?:que\\s+)?je possède\\s+(?:un|une)\\s+(\\w+)\\s+([A-ZÀ-ÿ\\w-]+)`, 'i'),
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: `possède un ${m[1]}`,
+          object: m[2].trim()
+        })
+      },
+
+      // "je possède une MARQUE" (générique)
+      {
+        regex: new RegExp(`(?:${escapedKeywords}\\s+)?(?:que\\s+)?je possède\\s+(?:un|une)\\s+(.+?)(?:\\.|$)`, 'i'),
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: 'possède',
+          object: m[1].trim()
         })
       },
 
