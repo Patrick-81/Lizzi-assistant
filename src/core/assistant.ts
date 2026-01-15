@@ -84,6 +84,17 @@ export class Assistant {
       return summary;
     }
 
+    // Détection prioritaire de l'identité (même sans mot-clé "mémorise")
+    const identityMatch = userMessage.match(/(?:je m'appelle|mon nom est|je suis)\s+([A-ZÀ-ÿ\w-]+)/i);
+    if (identityMatch) {
+      await this.longTermMemory.add(
+        's\'appelle',
+        identityMatch[1].trim(),
+        'Utilisateur',
+        userMessage
+      );
+    }
+
     // Vérifie si c'est une instruction de mémorisation
     if (this.memoryDetector.shouldMemorize(userMessage)) {
       const memoryInstruction = this.memoryDetector.extractMemoryInstruction(userMessage);
