@@ -3,6 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { Assistant } from './core/assistant.js';
+import { VoiceService } from './core/voice.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -19,6 +20,10 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 // Instance unique de l'assistant (pour garder la mémoire)
 const assistants = new Map<string, Assistant>();
+
+// Instance unique du service vocal
+const voiceService = new VoiceService();
+voiceService.initialize();
 
 // Route principale - sert le frontend
 app.get('/', (req, res) => {
@@ -158,6 +163,33 @@ app.delete('/api/facts/:id', async (req, res) => {
   } catch (error) {
     console.error('Erreur:', error);
     res.status(500).json({ error: 'Erreur lors de la suppression du fait' });
+  }
+});
+
+// API - Synthèse vocale
+app.post('/api/speak', async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text) {
+      return res.status(400).json({ error: 'Texte requis' });
+    }
+
+    console.log('🗣️  Génération audio pour:', text.substring(0, 100) + '...');
+
+    const audioFile = await voiceService.textToSpeech(text);
+    const audioUrl = `/audio/${path.basename(audioFile)}`;
+
+    res.json({
+      success: true,
+      audioUrl
+    });
+
+  } catch (error) {
+    console.error('Erreur TTS:', error);
+    res.status(500).json({
+      error: 'Erreur lors de la génération vocale'
+    });
   }
 });
 
