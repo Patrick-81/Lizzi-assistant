@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import { Assistant } from './core/assistant.js';
 import { VoiceService } from './core/voice.js';
+import { SystemMonitor } from './core/system-monitor.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -24,6 +25,9 @@ const assistants = new Map<string, Assistant>();
 // Instance unique du service vocal
 const voiceService = new VoiceService();
 voiceService.initialize();
+
+// Instance unique du moniteur système
+const systemMonitor = new SystemMonitor();
 
 // Route principale - sert le frontend
 app.get('/', (req, res) => {
@@ -189,6 +193,25 @@ app.post('/api/speak', async (req, res) => {
     console.error('Erreur TTS:', error);
     res.status(500).json({
       error: 'Erreur lors de la génération vocale'
+    });
+  }
+});
+
+// API - Statistiques système (VRAM, RAM, etc.)
+app.get('/api/system/stats', async (req, res) => {
+  try {
+    const stats = await systemMonitor.getStats();
+    const modelInfo = await systemMonitor.getModelInfo();
+
+    res.json({
+      success: true,
+      stats,
+      model: modelInfo
+    });
+  } catch (error) {
+    console.error('Erreur système:', error);
+    res.status(500).json({
+      error: 'Erreur lors de la récupération des stats'
     });
   }
 });

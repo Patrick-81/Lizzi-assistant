@@ -104,6 +104,16 @@ export class MemoryDetector {
         })
       },
 
+      // "j'ai une Tesla comme véhicule" ou "j'ai un MacBook comme ordinateur"
+      {
+        regex: new RegExp(`(?:${escapedKeywords}\\s+)?(?:que\\s+)?j'ai\\s+(?:un|une)\\s+([A-ZÀ-ÿ\\w-]+)\\s+comme\\s+(\\w+)`, 'i'),
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: `possède comme ${m[2]}`,
+          object: m[1].trim()
+        })
+      },
+
       // "je déteste les épinards"
       {
         regex: /je déteste\s+(.+?)(?:\.|$)/i,
