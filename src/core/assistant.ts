@@ -10,6 +10,7 @@ import { ToolSystem } from './tools.js';
 export class Assistant {
   private ollama: Ollama;
   private memory: ConversationMemory;
+  private static sharedLongTermMemory: LongTermMemory | null = null;
   private longTermMemory: LongTermMemory;
   private memoryDetector: MemoryDetector;
   private toolSystem: ToolSystem;
@@ -21,7 +22,13 @@ export class Assistant {
     this.ollama = new Ollama({ host: ollamaHost });
     this.model = process.env.MODEL_NAME || 'mistral';
     this.memory = new ConversationMemory();
-    this.longTermMemory = new LongTermMemory();
+    
+    // Utilise l'instance partagée de mémoire long terme
+    if (!Assistant.sharedLongTermMemory) {
+      Assistant.sharedLongTermMemory = new LongTermMemory();
+    }
+    this.longTermMemory = Assistant.sharedLongTermMemory;
+    
     this.memoryDetector = new MemoryDetector();
     this.toolSystem = new ToolSystem();
   }
@@ -67,8 +74,10 @@ export class Assistant {
   }
 
   async chat(userMessage: string): Promise<string> {
-    // Vérifier si on doit demander le prénom (uniquement au premier message)
+    // Récupérer le nom de l'utilisateur pour le contexte
     const userName = await this.getUserName();
+    
+    // Vérifier si on doit demander le prénom (uniquement au premier message)
     if (!userName && !this.hasAskedName && this.memory.getMessages().length === 0) {
       this.hasAskedName = true;
       const greeting = "Bonjour ! 😊 Avant de commencer, j'aimerais savoir comment tu t'appelles ?";
@@ -113,8 +122,13 @@ export class Assistant {
     const relevantMemories = await this.longTermMemory.search(userMessage);
     let memoryContext = '';
 
+    // Ajouter le nom de l'utilisateur en premier dans le contexte
+    if (userName) {
+      memoryContext = `\n\nCONTEXTE UTILISATEUR :\n- Tu parles avec ${userName}\n`;
+    }
+
     if (relevantMemories.length > 0) {
-      memoryContext = '\n\nSOUVENIRS PERTINENTS :\n';
+      memoryContext += '\nSOUVENIRS PERTINENTS :\n';
       relevantMemories.slice(0, 5).forEach(mem => {
         const objects = mem.objects.join(', ');
         memoryContext += `- ${mem.subject} ${mem.predicate}: ${objects}\n`;
