@@ -231,6 +231,41 @@
       background: #2a2a2a;
     }
 
+    .code-block-wrapper {
+      position: relative;
+      margin: 8px 0;
+    }
+
+    .code-block-wrapper .copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: rgba(0, 122, 255, 0.1);
+      color: #007aff;
+      border: 1px solid rgba(0, 122, 255, 0.3);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      z-index: 10;
+    }
+
+    .code-block-wrapper .copy-btn:hover {
+      background: rgba(0, 122, 255, 0.2);
+    }
+
+    .code-block-wrapper .copy-btn.copied {
+      background: rgba(52, 199, 89, 0.1);
+      color: #34c759;
+      border-color: rgba(52, 199, 89, 0.3);
+    }
+
+    body.dark-mode .code-block-wrapper .copy-btn {
+      background: rgba(0, 122, 255, 0.2);
+      border-color: rgba(0, 122, 255, 0.4);
+    }
+
     .message-content pre code {
       background: none;
       padding: 0;
@@ -950,6 +985,36 @@
       } else {
         // Parse le markdown pour les messages de l'assistante
         contentDiv.innerHTML = marked.parse(content);
+        
+        // Ajouter boutons "Copier" sur tous les blocs de code
+        const codeBlocks = contentDiv.querySelectorAll('pre');
+        codeBlocks.forEach(pre => {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'code-block-wrapper';
+          
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'copy-btn';
+          copyBtn.textContent = '📋 Copier';
+          copyBtn.onclick = () => {
+            const code = pre.querySelector('code');
+            const text = code ? code.textContent : pre.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+              copyBtn.textContent = '✅ Copié !';
+              copyBtn.classList.add('copied');
+              setTimeout(() => {
+                copyBtn.textContent = '📋 Copier';
+                copyBtn.classList.remove('copied');
+              }, 2000);
+            }).catch(err => {
+              console.error('Erreur copie:', err);
+              copyBtn.textContent = '❌ Erreur';
+            });
+          };
+          
+          pre.parentNode.insertBefore(wrapper, pre);
+          wrapper.appendChild(copyBtn);
+          wrapper.appendChild(pre);
+        });
       }
 
       messageDiv.appendChild(contentDiv);
