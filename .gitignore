@@ -13,19 +13,27 @@ public/audio/
 # Environment
 .env
 
-# Modèles
+# Modèles et binaires
 piper/
 piper-voices/
 *.onnx
 *.onnx.json
+*.tar.gz
+
+# Fichiers temporaires
+*.wav
+*.mp3
+*.xml
+*.backup
+*~
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
+.Trash-*
