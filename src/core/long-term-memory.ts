@@ -176,22 +176,25 @@ export class LongTermMemory {
   /**
    * Met à jour un fait existant
    */
-   async update(id: string, predicate: string, object: string, subject?: string): Promise<Fact | null> {
-     const fact = this.facts.get(id);
-     if (!fact) return null;
+  async update(id: string, predicate: string, objects: string[] | string, subject?: string): Promise<Fact | null> {
+    const fact = this.facts.get(id);
+    if (!fact) return null;
 
-     fact.predicate = predicate;
-     fact.objects = [object];
-     fact.object = object;      // Compatibilité
-     if (subject) fact.subject = subject;
-     fact.key = predicate;      // Compatibilité
-     fact.value = object;       // Compatibilité
-     fact.updatedAt = new Date().toISOString();
+    // Normalise les objets en tableau
+    const objectsArray = Array.isArray(objects) ? objects : [objects];
+    
+    fact.predicate = predicate;
+    fact.objects = objectsArray;
+    fact.object = objectsArray[0];      // Compatibilité (première valeur)
+    if (subject) fact.subject = subject;
+    fact.key = predicate;               // Compatibilité
+    fact.value = objectsArray[0];       // Compatibilité (première valeur)
+    fact.updatedAt = new Date().toISOString();
 
-     this.facts.set(id, fact);
-     await this.saveToFile();
-     return fact;
-   }
+    this.facts.set(id, fact);
+    await this.saveToFile();
+    return fact;
+  }
 
   async getFactsForSubject(subjectName: string): Promise<Fact[]> {
     const all = Array.from(this.facts.values());

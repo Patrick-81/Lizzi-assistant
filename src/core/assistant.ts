@@ -207,8 +207,10 @@ export class Assistant {
     return await this.longTermMemory.add(key, value, 'Utilisateur', context);
   }
 
-  async updateFact(id: string, subject: string, relation: string, object: string) {
-    return await this.longTermMemory.update(id, relation, object, subject);
+  async updateFact(id: string, predicate: string, objects: string[] | string, subject?: string) {
+    // Normalise les objets en tableau
+    const objectsArray = Array.isArray(objects) ? objects : [objects];
+    return await this.longTermMemory.update(id, predicate, objectsArray, subject);
   }
 
   async deleteFact(id: string) {

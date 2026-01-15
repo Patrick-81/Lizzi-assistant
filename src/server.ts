@@ -22,6 +22,16 @@ app.use(express.static(path.join(__dirname, '../public')));
 // Instance unique de l'assistant (pour garder la mémoire)
 const assistants = new Map<string, Assistant>();
 
+// Fonction helper pour obtenir l'assistant par défaut initialisé
+async function getDefaultAssistant(): Promise<Assistant> {
+  if (!assistants.has('default')) {
+    const assistant = new Assistant();
+    await assistant.initialize();
+    assistants.set('default', assistant);
+  }
+  return assistants.get('default')!;
+}
+
 // Instance unique du service vocal
 const voiceService = new VoiceService();
 voiceService.initialize();
@@ -94,12 +104,7 @@ app.get('/api/health', (req, res) => {
 // API - Gestion des faits (mémoire long terme)
 app.get('/api/facts', async (req, res) => {
   try {
-    const assistant = assistants.get('default') || new Assistant();
-    if (!assistants.has('default')) {
-      await assistant.initialize();
-      assistants.set('default', assistant);
-    }
-
+    const assistant = await getDefaultAssistant();
     const facts = await assistant.getAllFacts();
     res.json({ facts });
   } catch (error) {
@@ -116,12 +121,7 @@ app.post('/api/facts', async (req, res) => {
       return res.status(400).json({ error: 'Clé et valeur requises' });
     }
 
-    const assistant = assistants.get('default') || new Assistant();
-    if (!assistants.has('default')) {
-      await assistant.initialize();
-      assistants.set('default', assistant);
-    }
-
+    const assistant = await getDefaultAssistant();
     const fact = await assistant.saveFact(key, value);
     res.json({ fact });
   } catch (error) {
@@ -133,14 +133,18 @@ app.post('/api/facts', async (req, res) => {
 app.put('/api/facts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { key, value, subject } = req.body;
+    const { key, value, predicate, objects, subject } = req.body;
 
-    if (!key || !value) {
-      return res.status(400).json({ error: 'Clé et valeur requises' });
+    // Compatibilité avec ancien format (key/value) et nouveau (predicate/objects)
+    const finalPredicate = predicate || key;
+    const finalObjects = objects || (value ? [value] : []);
+
+    if (!finalPredicate || finalObjects.length === 0) {
+      return res.status(400).json({ error: 'Prédicat et au moins une valeur requis' });
     }
 
-    const assistant = assistants.get('default') || new Assistant();
-    const fact = await assistant.updateFact(id, key, value, subject);
+    const assistant = await getDefaultAssistant();
+    const fact = await assistant.updateFact(id, finalPredicate, finalObjects, subject);
 
     if (!fact) {
       return res.status(404).json({ error: 'Fait non trouvé' });
@@ -156,7 +160,7 @@ app.put('/api/facts/:id', async (req, res) => {
 app.delete('/api/facts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const assistant = assistants.get('default') || new Assistant();
+    const assistant = await getDefaultAssistant();
     const deleted = await assistant.deleteFact(id);
 
     if (!deleted) {

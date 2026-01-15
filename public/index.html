@@ -503,9 +503,35 @@
       margin-bottom: 4px;
     }
 
-    .fact-value {
+    .fact-values {
       color: #86868b;
       font-size: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .fact-value-item {
+      background: #f5f5f7;
+      padding: 4px 10px;
+      border-radius: 12px;
+      display: inline-block;
+      transition: background 0.2s;
+    }
+
+    body.dark-mode .fact-value-item {
+      background: #2a2a2a;
+    }
+
+    .fact-values.multi-value .fact-value-item {
+      background: #e3f2fd;
+      color: #1976d2;
+      font-weight: 500;
+    }
+
+    body.dark-mode .fact-values.multi-value .fact-value-item {
+      background: #1e3a5f;
+      color: #64b5f6;
     }
 
     .fact-actions {
@@ -1012,17 +1038,23 @@
           const factDiv = document.createElement('div');
           factDiv.className = 'fact-item';
 
-          // Échappe les guillemets pour éviter les problèmes avec onclick
-          const safeKey = fact.key.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-          const safeValue = fact.value.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+          // Utilise predicate et objects (format moderne)
+          const predicate = fact.predicate || fact.key;
+          const objects = fact.objects || [fact.value];
+          const isMulti = fact.isMultiValue || objects.length > 1;
+
+          // Affichage des valeurs
+          const valuesHtml = objects.map((obj, idx) => 
+            `<span class="fact-value-item" data-index="${idx}">${escapeHtml(obj)}</span>`
+          ).join('');
 
           factDiv.innerHTML = `
             <div class="fact-content">
-              <div class="fact-key">${escapeHtml(fact.key)}</div>
-              <div class="fact-value">${escapeHtml(fact.value)}</div>
+              <div class="fact-key">${escapeHtml(predicate)}</div>
+              <div class="fact-values ${isMulti ? 'multi-value' : ''}">${valuesHtml}</div>
             </div>
             <div class="fact-actions">
-              <button onclick='editFact("${fact.id}", "${safeKey}", "${safeValue}")' title="Modifier">✏️</button>
+              <button onclick='editFact(${JSON.stringify(fact)})' title="Modifier">✏️</button>
               <button onclick='deleteFact("${fact.id}")' style="color: #e74c3c;" title="Supprimer">🗑️</button>
             </div>
           `;
@@ -1066,27 +1098,51 @@
       }
     }
 
-    async function editFact(id, currentKey, currentValue) {
-      // Décode les entités HTML
-      currentKey = currentKey.replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-      currentValue = currentValue.replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+    async function editFact(fact) {
+      const predicate = fact.predicate || fact.key;
+      const objects = fact.objects || [fact.value];
+      const isMulti = fact.isMultiValue || objects.length > 1;
 
-      const key = prompt('Modifier la clé :', currentKey);
-      if (key === null) return; // Annulé
-
-      const value = prompt('Modifier la valeur :', currentValue);
-      if (value === null) return; // Annulé
-
-      if (!key.trim() || !value.trim()) {
-        alert('La clé et la valeur ne peuvent pas être vides');
+      // Modification du prédicat
+      const newPredicate = prompt('Modifier le prédicat :', predicate);
+      if (newPredicate === null) return;
+      if (!newPredicate.trim()) {
+        alert('Le prédicat ne peut pas être vide');
         return;
       }
 
+      let newObjects;
+      if (isMulti) {
+        // Multi-valeur : affiche toutes les valeurs séparées par des virgules
+        const currentValues = objects.join(', ');
+        const newValues = prompt('Modifier les valeurs (séparées par des virgules) :', currentValues);
+        if (newValues === null) return;
+        
+        newObjects = newValues.split(',').map(v => v.trim()).filter(v => v);
+        if (newObjects.length === 0) {
+          alert('Au moins une valeur est requise');
+          return;
+        }
+      } else {
+        // Valeur unique
+        const newValue = prompt('Modifier la valeur :', objects[0]);
+        if (newValue === null) return;
+        if (!newValue.trim()) {
+          alert('La valeur ne peut pas être vide');
+          return;
+        }
+        newObjects = [newValue.trim()];
+      }
+
       try {
-        const response = await fetch(`${API_URL}/api/facts/${id}`, {
+        const response = await fetch(`${API_URL}/api/facts/${fact.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: key.trim(), value: value.trim() })
+          body: JSON.stringify({ 
+            predicate: newPredicate.trim(),
+            objects: newObjects,
+            subject: fact.subject
+          })
         });
 
         if (response.ok) {
