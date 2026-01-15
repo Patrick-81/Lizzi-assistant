@@ -1,37 +1,23 @@
-// src/core/memory-detector.ts
+// src/core/memory-detector.ts - VERSION ROBUSTE
 
 export interface MemoryResult {
   subject: string;
-  key: string;
-  value: string;
+  predicate: string;  // Action/relation
+  object: string;     // Valeur/objet
 }
 
 export class MemoryDetector {
   private memoryKeywords = [
-    'souviens-toi',
-    'souviens',
-    'mémorise',
-    'mémorises',
-    'retiens',
-    'n\'oublie pas',
-    'n\'oublie',
-    'noublie',
-    'garde en mémoire',
-    'rappelle-toi',
-    'rappelle toi',
-    'enregistre'
+    'souviens-toi', 'souviens', 'mémorise', 'mémorises',
+    'retiens', 'n\'oublie pas', 'n\'oublie', 'noublie',
+    'garde en mémoire', 'rappelle-toi', 'rappelle toi', 'enregistre'
   ];
 
   private recallKeywords = [
-    'tu te souviens',
-    'te rappelles',
-    'qu\'est-ce que tu sais',
-    'de quoi tu te souviens',
-    'qu\'as-tu retenu',
-    'qu\'as-tu mémorisé',
-    'liste tes souvenirs',
-    'montre tes souvenirs',
-    'tes souvenirs'
+    'tu te souviens', 'te rappelles', 'qu\'est-ce que tu sais',
+    'de quoi tu te souviens', 'qu\'as-tu retenu',
+    'qu\'as-tu mémorisé', 'liste tes souvenirs',
+    'montre tes souvenirs', 'tes souvenirs'
   ];
 
   shouldMemorize(text: string): boolean {
@@ -45,57 +31,138 @@ export class MemoryDetector {
   }
 
   extractMemoryInstruction(text: string): MemoryResult | null {
-    const lowerText = text.toLowerCase();
-
-    // 1. Cas prioritaire : Identification de l'utilisateur
+    // 1. Identification de l'utilisateur (priorité absolue)
     const identityMatch = text.match(/(?:je m'appelle|mon nom est|je suis)\s+([A-ZÀ-ÿ\w-]+)/i);
     if (identityMatch) {
-      return { subject: 'Utilisateur', key: 'nom', value: identityMatch[1].trim() };
+      return {
+        subject: 'Utilisateur',
+        predicate: 's\'appelle',
+        object: identityMatch[1].trim()
+      };
     }
 
-    // 2. Préparation de la Regex dynamique pour les mots-clés
-    // On échappe les caractères spéciaux et on joint avec des pipes |
+    // 2. Détection du nom dans "moi [NOM]"
+    let detectedName: string | null = null;
+    const nameInPhrase = text.match(/\bmoi\s+([A-ZÀ-ÿ][a-zà-ÿ]+)/i);
+    if (nameInPhrase) {
+      detectedName = nameInPhrase[1].trim();
+    }
+
     const escapedKeywords = this.memoryKeywords
       .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
       .join('|');
 
+    // 3. Patterns structurés avec prédicats explicites
     const patterns = [
-      // Pattern pour : "Souviens-toi que mon chat s'appelle Belfégor"
-      new RegExp(`(?:${escapedKeywords})\\s+(?:que\\s+)?(?:mon|ma|mes)\\s+(\\w+)\\s+(?:est|sont|s'appelle)\\s+(.+)`, 'i'),
+      // "Mémorise que moi Patrick j'ai un chat nommé Belphégor"
+      {
+        regex: new RegExp(`(?:${escapedKeywords})\\s+(?:que\\s+)?(?:moi\\s+[A-ZÀ-ÿ\\w-]+\\s+)?j'ai\\s+(?:un|une|des)\\s+(\\w+)\\s+(?:nommé|nommée|appelé|appelée|qui s'appelle)\\s+([A-ZÀ-ÿ\\w-]+)`, 'i'),
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: `possède un ${m[1]}`,
+          object: m[2].trim()
+        })
+      },
 
-      // Pattern pour : "Mon chat s'appelle Belfégor" (sans mot clé au début)
-      /(?:mon|ma|mes)\s+(\w+)\s+(?:est|sont|s'appelle)\s+(.+)/i,
+      // "j'ai un chien nommé Pixel" (sans "moi NOM")
+      {
+        regex: new RegExp(`(?:${escapedKeywords}\\s+)?(?:que\\s+)?j'ai\\s+(?:un|une|des)\\s+(\\w+)\\s+(?:nommé|nommée|appelé|appelée|qui s'appelle)\\s+([A-ZÀ-ÿ\\w-]+)`, 'i'),
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: `possède un ${m[1]}`,
+          object: m[2].trim()
+        })
+      },
 
-      // Pattern générique : "Mémorise que la capitale est Paris"
-      new RegExp(`(?:${escapedKeywords})\\s+(?:que\\s+)?(.+)`, 'i')
+      // "mon chat s'appelle Belfégor"
+      {
+        regex: /(?:mon|ma|mes)\s+(\w+)\s+s'appelle\s+([A-ZÀ-ÿ\w-]+)/i,
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: `possède un ${m[1]}`,
+          object: m[2].trim()
+        })
+      },
+
+      // "mon chat est noir" ou "ma voiture est rouge"
+      {
+        regex: /(?:mon|ma|mes)\s+(\w+)\s+(?:est|sont)\s+(.+?)(?:\.|$)/i,
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: `a un ${m[1]} qui est`,
+          object: m[2].trim()
+        })
+      },
+
+      // "j'aime le chocolat"
+      {
+        regex: new RegExp(`(?:${escapedKeywords}\\s+)?(?:que\\s+)?j'aime\\s+(.+?)(?:\\.|$)`, 'i'),
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: 'aime',
+          object: m[1].trim()
+        })
+      },
+
+      // "je déteste les épinards"
+      {
+        regex: /je déteste\s+(.+?)(?:\.|$)/i,
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: 'déteste',
+          object: m[1].trim()
+        })
+      },
+
+      // "j'habite à Paris"
+      {
+        regex: /j'habite\s+(?:à|au|en|dans)\s+(.+?)(?:\.|$)/i,
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: 'habite à',
+          object: m[1].trim()
+        })
+      },
+
+      // "je travaille chez Google"
+      {
+        regex: /je travaille\s+(?:chez|à|pour)\s+(.+?)(?:\.|$)/i,
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: 'travaille chez',
+          object: m[1].trim()
+        })
+      },
+
+      // "ma couleur préférée est le bleu"
+      {
+        regex: /(?:mon|ma|mes)\s+(.+?)\s+(?:préféré|préférée|préférés|préférées)\s+(?:est|sont)\s+(.+?)(?:\.|$)/i,
+        handler: (m: RegExpMatchArray) => ({
+          subject: detectedName || 'Utilisateur',
+          predicate: m[1].trim(),
+          object: m[2].trim()
+        })
+      }
     ];
 
+    // Tester chaque pattern
     for (const pattern of patterns) {
-      const match = text.match(pattern);
+      const match = text.match(pattern.regex);
       if (match) {
-        // Si on a capturé deux groupes (ex: chat et Belfégor)
-        if (match[2]) {
-          return {
-            subject: 'Utilisateur',
-            key: match[1].trim(),
-            value: match[2].trim()
-          };
-        }
+        const result = pattern.handler(match);
 
-        // Si on a capturé un bloc de texte brut (ex: "le code est 1234")
-        const content = match[1];
-        const parts = content.split(/\s+(?:est|sont|s'appelle|se nomme|:)\s+/i);
+        // Log pour debug
+        console.log('🎯 Pattern matched:', {
+          regex: pattern.regex.source.substring(0, 50) + '...',
+          match: match[0],
+          result
+        });
 
-        if (parts.length >= 2) {
-          return {
-            subject: 'Utilisateur',
-            key: parts[0].trim(),
-            value: parts.slice(1).join(' ').trim()
-          };
-        }
+        return result;
       }
     }
 
+    console.log('⚠️ Aucun pattern ne correspond à:', text);
     return null;
   }
 }
