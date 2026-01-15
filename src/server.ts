@@ -174,6 +174,23 @@ app.delete('/api/facts/:id', async (req, res) => {
   }
 });
 
+// API - Recherche de faits
+app.get('/api/facts/search', async (req, res) => {
+  try {
+    const query = req.query.q as string;
+    if (!query) {
+      return res.status(400).json({ error: 'Paramètre q requis' });
+    }
+    
+    const assistant = await getDefaultAssistant();
+    const facts = await assistant.searchFacts(query);
+    res.json(facts);
+  } catch (error) {
+    console.error('Erreur recherche:', error);
+    res.status(500).json({ error: 'Erreur lors de la recherche' });
+  }
+});
+
 // API - Synthèse vocale
 app.post('/api/speak', async (req, res) => {
   try {

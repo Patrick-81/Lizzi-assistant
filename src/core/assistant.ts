@@ -259,4 +259,8 @@ export class Assistant {
   async deleteFact(id: string) {
     return await this.longTermMemory.delete(id);
   }
+
+  async searchFacts(query: string) {
+    return await this.longTermMemory.search(query);
+  }
 }

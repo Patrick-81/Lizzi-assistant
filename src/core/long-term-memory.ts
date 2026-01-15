@@ -228,12 +228,16 @@ export class LongTermMemory {
       if (!word.endsWith('s')) expandedKeywords.add(word + 's');
       // Pluriel → singulier
       if (word.endsWith('s') && word.length > 3) expandedKeywords.add(word.slice(0, -1));
-      // Variantes animaux
-      if (word === 'animaux') {
+      // Variantes animaux (tous les types connus)
+      if (word === 'animaux' || word === 'animal') {
         expandedKeywords.add('animal');
         expandedKeywords.add('chat');
         expandedKeywords.add('chien');
         expandedKeywords.add('souris');
+        expandedKeywords.add('oiseau');
+        expandedKeywords.add('cheval');
+        expandedKeywords.add('lapin');
+        expandedKeywords.add('poisson');
       }
     });
     
