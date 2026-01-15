@@ -152,7 +152,11 @@ export class Assistant {
       memoryContext += '\nSOUVENIRS PERTINENTS :\n';
       relevantMemories.slice(0, 5).forEach(mem => {
         const objects = mem.objects.join(', ');
-        memoryContext += `- ${mem.subject} ${mem.predicate}: ${objects}\n`;
+        // Normalise "Utilisateur" vers le nom réel si connu
+        const displaySubject = (mem.subject === 'Utilisateur' && userName) ? userName : mem.subject;
+        const contextLine = `- ${displaySubject} ${mem.predicate}: ${objects}\n`;
+        memoryContext += contextLine;
+        console.log(`📌 Ajout contexte: ${contextLine.trim()}`);
       });
     }
 
@@ -168,6 +172,10 @@ export class Assistant {
       },
       ...this.memory.getMessages()
     ];
+
+    console.log('📤 Prompt système envoyé au LLM:');
+    console.log(messages[0].content.substring(0, 500) + '...');
+    console.log(`📊 Contexte mémoire (${memoryContext.length} chars)`);
 
     try {
       const response = await this.ollama.chat({

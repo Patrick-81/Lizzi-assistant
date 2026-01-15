@@ -213,13 +213,31 @@ export class LongTermMemory {
                        'mon', 'ma', 'mes', 'ton', 'ta', 'tes', 'son', 'sa', 'ses',
                        'quel', 'quelle', 'quels', 'quelles', 'que', 'qui', 'quoi',
                        'est', 'sont', 'suis', 'es', 'sommes', 'être', 'avoir',
-                       'a', 'ai', 'as', 'avons', 'avez', 'ont', '?', '.', '!', ','];
+                       'a', 'ai', 'as', 'avons', 'avez', 'ont', '?', '.', '!', ',',
+                       'combien', 'nombre'];
     
-    const keywords = lowerQuery
+    let keywords = lowerQuery
       .split(/\s+/)
       .filter(word => word.length > 2 && !stopWords.includes(word));
     
-    if (keywords.length === 0) {
+    // Ajouter les singuliers/pluriels des mots-clés
+    const expandedKeywords = new Set<string>();
+    keywords.forEach(word => {
+      expandedKeywords.add(word);
+      // Singulier → pluriel
+      if (!word.endsWith('s')) expandedKeywords.add(word + 's');
+      // Pluriel → singulier
+      if (word.endsWith('s') && word.length > 3) expandedKeywords.add(word.slice(0, -1));
+      // Variantes animaux
+      if (word === 'animaux') {
+        expandedKeywords.add('animal');
+        expandedKeywords.add('chat');
+        expandedKeywords.add('chien');
+        expandedKeywords.add('souris');
+      }
+    });
+    
+    if (expandedKeywords.size === 0) {
       return Array.from(this.facts.values());
     }
     
@@ -229,7 +247,7 @@ export class LongTermMemory {
       const searchText = `${fact.subject} ${predicate} ${objectsStr}`.toLowerCase();
       
       // Retourne vrai si au moins un mot-clé est trouvé
-      return keywords.some(keyword => searchText.includes(keyword));
+      return Array.from(expandedKeywords).some(keyword => searchText.includes(keyword));
     });
   }
 
