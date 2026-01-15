@@ -5,6 +5,7 @@ import { SYSTEM_PROMPT } from './personality.js';
 import { ConversationMemory } from './memory.js';
 import { LongTermMemory } from './long-term-memory.js';
 import { MemoryDetector } from './memory-detector.js';
+import { SemanticExtractor } from './semantic-extractor.js';
 import { ToolSystem } from './tools.js';
 
 export class Assistant {
@@ -13,6 +14,7 @@ export class Assistant {
   private static sharedLongTermMemory: LongTermMemory | null = null;
   private longTermMemory: LongTermMemory;
   private memoryDetector: MemoryDetector;
+  private semanticExtractor: SemanticExtractor;
   private toolSystem: ToolSystem;
   private model: string;
   private hasAskedName: boolean = false;
@@ -30,6 +32,7 @@ export class Assistant {
     this.longTermMemory = Assistant.sharedLongTermMemory;
     
     this.memoryDetector = new MemoryDetector();
+    this.semanticExtractor = new SemanticExtractor(this.ollama, this.model);
     this.toolSystem = new ToolSystem();
   }
 
@@ -104,17 +107,32 @@ export class Assistant {
       );
     }
 
-    // Vérifie si c'est une instruction de mémorisation
+    // Vérifie si c'est une instruction de mémorisation - EXTRACTION SÉMANTIQUE LLM
     if (this.memoryDetector.shouldMemorize(userMessage)) {
-      const memoryInstruction = this.memoryDetector.extractMemoryInstruction(userMessage);
-
-      if (memoryInstruction) {
+      console.log('📝 Détection mémorisation - extraction sémantique via LLM...');
+      
+      const triple = await this.semanticExtractor.extractTriple(userMessage, userName || undefined);
+      
+      if (triple) {
+        console.log('✅ Triplet extrait:', triple);
         await this.longTermMemory.add(
-          memoryInstruction.predicate,
-          memoryInstruction.object,
-          memoryInstruction.subject,
+          triple.predicate,
+          triple.object,
+          triple.subject,
           userMessage
         );
+      } else {
+        console.log('⚠️ Aucun triplet extrait - fallback sur regex');
+        // Fallback sur l'ancienne méthode si LLM échoue
+        const memoryInstruction = this.memoryDetector.extractMemoryInstruction(userMessage);
+        if (memoryInstruction) {
+          await this.longTermMemory.add(
+            memoryInstruction.predicate,
+            memoryInstruction.object,
+            memoryInstruction.subject,
+            userMessage
+          );
+        }
       }
     }
 
