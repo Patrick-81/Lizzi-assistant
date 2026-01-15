@@ -1054,10 +1054,12 @@
               <div class="fact-values ${isMulti ? 'multi-value' : ''}">${valuesHtml}</div>
             </div>
             <div class="fact-actions">
-              <button onclick='editFact(${JSON.stringify(fact)})' title="Modifier">✏️</button>
+              <button onclick="editFactById('${fact.id}')" title="Modifier">✏️</button>
               <button onclick='deleteFact("${fact.id}")' style="color: #e74c3c;" title="Supprimer">🗑️</button>
             </div>
           `;
+          factDiv.dataset.factId = fact.id;
+          factDiv.dataset.fact = JSON.stringify(fact);
           container.appendChild(factDiv);
         });
       } catch (error) {
@@ -1096,6 +1098,18 @@
         console.error('Erreur ajout fait:', error);
         alert('Erreur lors de l\'ajout du fait');
       }
+    }
+
+    async function editFactById(factId) {
+      // Récupérer le fait depuis l'élément DOM
+      const factDiv = document.querySelector(`[data-fact-id="${factId}"]`);
+      if (!factDiv) {
+        alert('Fait introuvable');
+        return;
+      }
+      
+      const fact = JSON.parse(factDiv.dataset.fact);
+      await editFact(fact);
     }
 
     async function editFact(fact) {
