@@ -31,8 +31,9 @@ RÈGLES D'EXTRACTION :
 
 2. Sujet : L'entité qui fait l'action
    - Si "je/j'" dans la phrase, le sujet est "${userName || 'Utilisateur'}"
-   - Si "mon chat", le sujet est "${userName || 'Utilisateur'}" (PAS juste "chat")
-   - Si "ma voiture", le sujet est "${userName || 'Utilisateur'}" (PAS juste "voiture")
+   - Si "mon chat/chien/animal X", et que X fait l'action, le sujet est le NOM de l'animal (ex: "Pixel", "Belphégor")
+   - Si "ma voiture" est possédée, le sujet est "${userName || 'Utilisateur'}"
+   - IMPORTANT: identifie le VRAI acteur (qui fait l'action), pas le propriétaire
    
 3. Prédicat (relation) : Le verbe ou l'action À LA 3ÈME PERSONNE
    - "j'aime" → "aime" (PAS "j'aime")
@@ -48,6 +49,8 @@ RÈGLES D'EXTRACTION :
 EXEMPLES CORRECTS :
 - "mémorise que je possède un véhicule Tesla" → {"subject":"${userName || 'Utilisateur'}","predicate":"possède","object":"véhicule Tesla"}
 - "retiens que mon chat s'appelle Belphégor" → {"subject":"${userName || 'Utilisateur'}","predicate":"a un chat nommé","object":"Belphégor"}
+- "Pixel aime chasser les chats" → {"subject":"Pixel","predicate":"aime","object":"chasser les chats"}
+- "Belphégor déteste l'eau" → {"subject":"Belphégor","predicate":"déteste","object":"l'eau"}
 - "souviens-toi que j'habite à Paris" → {"subject":"${userName || 'Utilisateur'}","predicate":"habite à","object":"Paris"}
 - "n'oublie pas que je déteste les épinards" → {"subject":"${userName || 'Utilisateur'}","predicate":"déteste","object":"les épinards"}
 - "j'aime les spaghettis" → {"subject":"${userName || 'Utilisateur'}","predicate":"aime","object":"les spaghettis"}
