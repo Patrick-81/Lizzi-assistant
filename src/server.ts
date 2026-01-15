@@ -5,11 +5,9 @@ import cors from 'cors';
 import { Assistant } from './core/assistant.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { SystemMonitor } from './core/system-monitor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const systemMonitor = new SystemMonitor();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -126,14 +124,14 @@ app.post('/api/facts', async (req, res) => {
 app.put('/api/facts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { key, value } = req.body;
+    const { key, value, subject } = req.body;
 
     if (!key || !value) {
       return res.status(400).json({ error: 'Clé et valeur requises' });
     }
 
     const assistant = assistants.get('default') || new Assistant();
-    const fact = await assistant.updateFact(id, key, value);
+    const fact = await assistant.updateFact(id, key, value, subject);
 
     if (!fact) {
       return res.status(404).json({ error: 'Fait non trouvé' });
@@ -167,18 +165,4 @@ app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur http://localhost:${PORT}`);
   console.log(`📡 Connecté à Ollama sur ${process.env.OLLAMA_HOST}`);
   console.log(`🤖 Modèle: ${process.env.MODEL_NAME}`);
-});
-app.get('/api/system/stats', async (req, res) => {
-  try {
-    const stats = await systemMonitor.getStats();
-    const modelInfo = await systemMonitor.getModelInfo();
-
-    res.json({
-      stats,
-      model: modelInfo
-    });
-  } catch (error) {
-    console.error('Erreur stats système:', error);
-    res.status(500).json({ error: 'Erreur lors de la récupération des stats' });
-  }
 });
