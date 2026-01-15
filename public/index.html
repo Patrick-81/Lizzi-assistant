@@ -1104,9 +1104,12 @@
     }
 
     async function loadFacts() {
+      console.log('🔄 Chargement des faits...');
       try {
         const response = await fetch(`${API_URL}/api/facts`);
         const data = await response.json();
+
+        console.log('✅ Faits reçus:', data.facts.length);
 
         const container = document.getElementById('factsContainer');
         const countElement = document.getElementById('factsCount');
@@ -1119,7 +1122,8 @@
         }
 
         container.innerHTML = '';
-        data.facts.forEach(fact => {
+        data.facts.forEach((fact, index) => {
+          console.log(`📝 Fait ${index + 1}:`, fact.id, fact.subject, fact.predicate);
           const factDiv = document.createElement('div');
           factDiv.className = 'fact-item';
 
@@ -1199,14 +1203,20 @@
     }
 
     async function editFactById(factId) {
+      console.log('🖊️ editFactById appelé avec:', factId);
       // Récupérer le fait depuis l'élément DOM
       const factDiv = document.querySelector(`[data-fact-id="${factId}"]`);
+      console.log('📦 Élément trouvé:', factDiv);
       if (!factDiv) {
+        console.error('❌ Fact div not found for id:', factId);
         alert('Fait introuvable');
         return;
       }
       
-      const fact = JSON.parse(factDiv.dataset.fact);
+      const factData = factDiv.dataset.fact;
+      console.log('📄 Données brutes:', factData);
+      const fact = JSON.parse(factData);
+      console.log('✅ Fait parsé:', fact);
       await editFact(fact);
     }
 

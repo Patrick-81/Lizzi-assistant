@@ -30,13 +30,16 @@ RÈGLES D'EXTRACTION :
    - Ces mots indiquent qu'il faut mémoriser, mais ne font PAS partie du fait lui-même
 
 2. Sujet : L'entité qui fait l'action
-   - Si "je/j'", utilise "${userName || 'Utilisateur'}"
-   - Si "mon/ma/mes X", utilise "X de ${userName || 'Utilisateur'}"
+   - Si "je/j'" dans la phrase, le sujet est "${userName || 'Utilisateur'}"
+   - Si "mon chat", le sujet est "${userName || 'Utilisateur'}" (PAS juste "chat")
+   - Si "ma voiture", le sujet est "${userName || 'Utilisateur'}" (PAS juste "voiture")
    
-3. Prédicat (relation) : Le verbe ou l'action RÉELLE
-   - Utilise l'infinitif ou forme nominale (ex: "aime", "possède", "habite à")
-   - Sois concis mais précis
-   - N'inclus JAMAIS les mots d'instruction
+3. Prédicat (relation) : Le verbe ou l'action À LA 3ÈME PERSONNE
+   - "j'aime" → "aime" (PAS "j'aime")
+   - "je possède" → "possède" (PAS "je possède")
+   - "j'ai un chat" → "a un chat" (PAS "j'ai")
+   - Utilise l'infinitif ou forme nominale
+   - N'inclus JAMAIS "je/j'/mon/ma"
    
 4. Objet : Ce qui est affecté par l'action
    - Garde les détails importants
@@ -44,11 +47,12 @@ RÈGLES D'EXTRACTION :
 
 EXEMPLES CORRECTS :
 - "mémorise que je possède un véhicule Tesla" → {"subject":"${userName || 'Utilisateur'}","predicate":"possède","object":"véhicule Tesla"}
-- "retiens que mon chat s'appelle Belphégor" → {"subject":"chat de ${userName || 'Utilisateur'}","predicate":"s'appelle","object":"Belphégor"}
+- "retiens que mon chat s'appelle Belphégor" → {"subject":"${userName || 'Utilisateur'}","predicate":"a un chat nommé","object":"Belphégor"}
 - "souviens-toi que j'habite à Paris" → {"subject":"${userName || 'Utilisateur'}","predicate":"habite à","object":"Paris"}
 - "n'oublie pas que je déteste les épinards" → {"subject":"${userName || 'Utilisateur'}","predicate":"déteste","object":"les épinards"}
+- "j'aime les spaghettis" → {"subject":"${userName || 'Utilisateur'}","predicate":"aime","object":"les spaghettis"}
 - "je travaille chez Google" → {"subject":"${userName || 'Utilisateur'}","predicate":"travaille chez","object":"Google"}
-- "ma couleur préférée est le bleu" → {"subject":"${userName || 'Utilisateur'}","predicate":"couleur préférée","object":"bleu"}
+- "ma couleur préférée est le bleu" → {"subject":"${userName || 'Utilisateur'}","predicate":"a comme couleur préférée","object":"bleu"}
 
 IMPORTANT :
 - Réponds UNIQUEMENT avec le JSON (pas de texte avant/après)
