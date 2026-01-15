@@ -497,6 +497,87 @@
       flex: 1;
     }
 
+    /* Style triplet (Sujet → Relation → Objet) */
+    .triplet-display {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 4px 0;
+    }
+
+    .triplet-part {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .triplet-part.subject {
+      min-width: 100px;
+    }
+
+    .triplet-part.predicate {
+      min-width: 120px;
+    }
+
+    .triplet-part.object {
+      flex: 1;
+      min-width: 150px;
+    }
+
+    .triplet-part label {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #86868b;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    .triplet-value {
+      font-weight: 600;
+      color: #1d1d1f;
+      padding: 6px 12px;
+      background: #f5f5f7;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+
+    body.dark-mode .triplet-value {
+      background: #2a2a2a;
+      color: #e5e5e7;
+    }
+
+    .triplet-part.subject .triplet-value {
+      background: #e3f2fd;
+      color: #1976d2;
+    }
+
+    body.dark-mode .triplet-part.subject .triplet-value {
+      background: #1e3a5f;
+      color: #64b5f6;
+    }
+
+    .triplet-part.predicate .triplet-value {
+      background: #f3e5f5;
+      color: #7b1fa2;
+    }
+
+    body.dark-mode .triplet-part.predicate .triplet-value {
+      background: #4a1a5c;
+      color: #ba68c8;
+    }
+
+    .triplet-arrow {
+      font-size: 18px;
+      color: #86868b;
+      font-weight: bold;
+    }
+
+    .triplet-values {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
     .fact-key {
       font-weight: 600;
       color: #1d1d1f;
@@ -512,26 +593,30 @@
     }
 
     .fact-value-item {
-      background: #f5f5f7;
-      padding: 4px 10px;
-      border-radius: 12px;
+      background: #fff3e0;
+      color: #e65100;
+      padding: 6px 12px;
+      border-radius: 8px;
       display: inline-block;
       transition: background 0.2s;
+      font-weight: 500;
+      font-size: 13px;
     }
 
     body.dark-mode .fact-value-item {
-      background: #2a2a2a;
+      background: #5c3a1a;
+      color: #ffb74d;
     }
 
     .fact-values.multi-value .fact-value-item {
-      background: #e3f2fd;
-      color: #1976d2;
+      background: #fff3e0;
+      color: #e65100;
       font-weight: 500;
     }
 
     body.dark-mode .fact-values.multi-value .fact-value-item {
-      background: #1e3a5f;
-      color: #64b5f6;
+      background: #5c3a1a;
+      color: #ffb74d;
     }
 
     .fact-actions {
@@ -1039,19 +1124,32 @@
           factDiv.className = 'fact-item';
 
           // Utilise predicate et objects (format moderne)
+          const subject = fact.subject || 'Utilisateur';
           const predicate = fact.predicate || fact.key;
           const objects = fact.objects || [fact.value];
           const isMulti = fact.isMultiValue || objects.length > 1;
 
-          // Affichage des valeurs
+          // Affichage structuré en triplet (Sujet - Prédicat - Objet)
           const valuesHtml = objects.map((obj, idx) => 
             `<span class="fact-value-item" data-index="${idx}">${escapeHtml(obj)}</span>`
           ).join('');
 
           factDiv.innerHTML = `
-            <div class="fact-content">
-              <div class="fact-key">${escapeHtml(predicate)}</div>
-              <div class="fact-values ${isMulti ? 'multi-value' : ''}">${valuesHtml}</div>
+            <div class="fact-content triplet-display">
+              <div class="triplet-part subject">
+                <label>Sujet</label>
+                <div class="triplet-value">${escapeHtml(subject)}</div>
+              </div>
+              <div class="triplet-arrow">→</div>
+              <div class="triplet-part predicate">
+                <label>Relation</label>
+                <div class="triplet-value">${escapeHtml(predicate)}</div>
+              </div>
+              <div class="triplet-arrow">→</div>
+              <div class="triplet-part object">
+                <label>Objet${isMulti ? 's' : ''}</label>
+                <div class="triplet-values ${isMulti ? 'multi-value' : ''}">${valuesHtml}</div>
+              </div>
             </div>
             <div class="fact-actions">
               <button onclick="editFactById('${fact.id}')" title="Modifier">✏️</button>
@@ -1113,15 +1211,24 @@
     }
 
     async function editFact(fact) {
+      const subject = fact.subject || 'Utilisateur';
       const predicate = fact.predicate || fact.key;
       const objects = fact.objects || [fact.value];
       const isMulti = fact.isMultiValue || objects.length > 1;
 
+      // Modification du sujet
+      const newSubject = prompt('Modifier le sujet :', subject);
+      if (newSubject === null) return;
+      if (!newSubject.trim()) {
+        alert('Le sujet ne peut pas être vide');
+        return;
+      }
+
       // Modification du prédicat
-      const newPredicate = prompt('Modifier le prédicat :', predicate);
+      const newPredicate = prompt('Modifier la relation (prédicat) :', predicate);
       if (newPredicate === null) return;
       if (!newPredicate.trim()) {
-        alert('Le prédicat ne peut pas être vide');
+        alert('La relation ne peut pas être vide');
         return;
       }
 
@@ -1129,20 +1236,20 @@
       if (isMulti) {
         // Multi-valeur : affiche toutes les valeurs séparées par des virgules
         const currentValues = objects.join(', ');
-        const newValues = prompt('Modifier les valeurs (séparées par des virgules) :', currentValues);
+        const newValues = prompt('Modifier les objets (séparés par des virgules) :', currentValues);
         if (newValues === null) return;
         
         newObjects = newValues.split(',').map(v => v.trim()).filter(v => v);
         if (newObjects.length === 0) {
-          alert('Au moins une valeur est requise');
+          alert('Au moins un objet est requis');
           return;
         }
       } else {
         // Valeur unique
-        const newValue = prompt('Modifier la valeur :', objects[0]);
+        const newValue = prompt('Modifier l\'objet :', objects[0]);
         if (newValue === null) return;
         if (!newValue.trim()) {
-          alert('La valeur ne peut pas être vide');
+          alert('L\'objet ne peut pas être vide');
           return;
         }
         newObjects = [newValue.trim()];
@@ -1153,9 +1260,9 @@
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
+            subject: newSubject.trim(),
             predicate: newPredicate.trim(),
-            objects: newObjects,
-            subject: fact.subject
+            objects: newObjects
           })
         });
 
