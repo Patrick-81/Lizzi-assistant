@@ -403,6 +403,57 @@
       color: #34c759;
     }
 
+    #micBtn.recording {
+      color: #ff3b30;
+      animation: pulse 1s ease-in-out infinite;
+    }
+
+    .recording-indicator {
+      display: none;
+      padding: 15px 30px;
+      background: #ff3b30;
+      color: white;
+      font-size: 14px;
+      font-weight: 500;
+      align-items: center;
+      gap: 10px;
+      border-top: 1px solid rgba(255,255,255,0.2);
+    }
+
+    .recording-indicator.active {
+      display: flex;
+    }
+
+    .recording-pulse {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      background: white;
+      border-radius: 50%;
+      animation: pulse 1s ease-in-out infinite;
+    }
+
+    .volume-meter {
+      flex: 1;
+      height: 8px;
+      background: rgba(255,255,255,0.3);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-left: 15px;
+    }
+
+    .volume-bar {
+      height: 100%;
+      background: white;
+      width: 0%;
+      transition: width 0.1s;
+      border-radius: 4px;
+    }
+
+    body.dark-mode .recording-indicator {
+      background: #ff3b30;
+    }
+
     .loading {
       display: none;
       padding: 10px 30px;
@@ -863,10 +914,20 @@
       </div>
 
       <div class="loading" id="loading">Lizzi réfléchit...</div>
+      <div class="recording-indicator" id="recordingIndicator">
+        <span class="recording-pulse"></span>
+        <span class="recording-text">🎙️ Enregistrement en cours...</span>
+        <div class="volume-meter">
+          <div class="volume-bar" id="volumeBar"></div>
+        </div>
+      </div>
 
       <div class="input-container">
         <button class="icon-btn voice-toggle active" id="voiceToggle" onclick="toggleVoice()" title="Activer/désactiver la voix">
           🔊
+        </button>
+        <button class="icon-btn" id="micBtn" onclick="toggleMicrophone()" title="Parler à Lizzi">
+          🎤
         </button>
         <input
           type="text"
@@ -914,6 +975,13 @@
     const sessionId = 'session_' + Date.now();
     let voiceEnabled = true;
     let currentAudio = null;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let isRecording = false;
+    let audioContext = null;
+    let analyser = null;
+    let volumeInterval = null;
+    let spacebarPressed = false;
 
     async function checkHealth() {
       try {
@@ -1061,7 +1129,8 @@
       } finally {
         sendBtn.disabled = false;
         document.getElementById('loading').classList.remove('active');
-        input.focus();
+        // Focus enlevé pour permettre push-to-talk par défaut
+        // input.focus();
       }
     }
 
@@ -1169,6 +1238,150 @@
       }
     }
 
+    async function toggleMicrophone() {
+      const micBtn = document.getElementById('micBtn');
+      const recordingIndicator = document.getElementById('recordingIndicator');
+      
+      if (!isRecording) {
+        try {
+          console.log('🎤 Demande d\'accès au micro...');
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          console.log('✅ Accès micro autorisé');
+          
+          // Créer l'analyseur audio pour le vuemètre
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          analyser = audioContext.createAnalyser();
+          const source = audioContext.createMediaStreamSource(stream);
+          source.connect(analyser);
+          analyser.fftSize = 256;
+          
+          // Démarrer le vuemètre
+          startVolumeMeter();
+          
+          mediaRecorder = new MediaRecorder(stream);
+          audioChunks = [];
+
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              audioChunks.push(event.data);
+              console.log('📦 Chunk audio reçu:', event.data.size, 'bytes');
+            }
+          };
+
+          mediaRecorder.onstop = async () => {
+            console.log('⏹️ Enregistrement arrêté, chunks:', audioChunks.length);
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            console.log('📊 Taille audio blob:', audioBlob.size, 'bytes');
+            await transcribeAudio(audioBlob);
+            stream.getTracks().forEach(track => track.stop());
+            stopVolumeMeter();
+          };
+
+          mediaRecorder.start();
+          isRecording = true;
+          micBtn.classList.add('recording');
+          micBtn.textContent = '⏹️';
+          micBtn.title = 'Arrêter l\'enregistrement';
+          recordingIndicator.classList.add('active');
+          console.log('🔴 Enregistrement démarré');
+        } catch (error) {
+          console.error('❌ Erreur accès micro:', error);
+          alert('Impossible d\'accéder au microphone.\n\nVérifiez que:\n- Vous êtes en HTTPS\n- Les permissions sont autorisées\n- Un micro est connecté');
+        }
+      } else {
+        console.log('⏹️ Arrêt de l\'enregistrement...');
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+        }
+        isRecording = false;
+        micBtn.classList.remove('recording');
+        micBtn.textContent = '🎤';
+        micBtn.title = 'Parler à Lizzi';
+        recordingIndicator.classList.remove('active');
+        stopVolumeMeter();
+      }
+    }
+
+    function startVolumeMeter() {
+      const volumeBar = document.getElementById('volumeBar');
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      
+      volumeInterval = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+        const percentage = Math.min(100, (average / 128) * 100);
+        volumeBar.style.width = percentage + '%';
+      }, 50);
+    }
+
+    function stopVolumeMeter() {
+      if (volumeInterval) {
+        clearInterval(volumeInterval);
+        volumeInterval = null;
+      }
+      if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+      }
+      const volumeBar = document.getElementById('volumeBar');
+      if (volumeBar) {
+        volumeBar.style.width = '0%';
+      }
+    }
+
+    async function transcribeAudio(audioBlob) {
+      const micBtn = document.getElementById('micBtn');
+      const sendBtn = document.getElementById('sendBtn');
+
+      try {
+        console.log('🎙️ Début transcription, taille:', audioBlob.size, 'bytes');
+        micBtn.disabled = true;
+        sendBtn.disabled = true;
+        document.getElementById('loading').classList.add('active');
+        document.getElementById('loading').textContent = 'Transcription en cours...';
+
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        console.log('📦 ArrayBuffer créé:', arrayBuffer.byteLength, 'bytes');
+        
+        const base64Audio = btoa(
+          new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+        );
+        console.log('🔤 Audio encodé en base64:', base64Audio.length, 'caractères');
+
+        console.log('📡 Envoi à l\'API /api/transcribe...');
+        const response = await fetch(`${API_URL}/api/transcribe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio: base64Audio })
+        });
+
+        console.log('📨 Réponse reçue, status:', response.status);
+        const data = await response.json();
+        console.log('📝 Données:', data);
+
+        if (data.text && data.text.trim()) {
+          console.log('✅ Texte transcrit:', data.text);
+          document.getElementById('messageInput').value = data.text;
+          
+          // Envoyer automatiquement à Lizzi
+          console.log('🚀 Envoi automatique à Lizzi...');
+          await sendMessage();
+        } else {
+          console.warn('⚠️ Aucun texte détecté dans la réponse');
+          alert('Aucun texte détecté. Parlez plus fort ou plus longtemps.');
+        }
+      } catch (error) {
+        console.error('❌ Erreur transcription:', error);
+        alert('Erreur lors de la transcription: ' + error.message);
+      } finally {
+        micBtn.disabled = false;
+        sendBtn.disabled = false;
+        document.getElementById('loading').classList.remove('active');
+        document.getElementById('loading').textContent = 'Lizzi réfléchit...';
+      }
+    }
+
     function switchTab(tab) {
       // Gestion des onglets
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1177,7 +1390,8 @@
       if (tab === 'chat') {
         document.querySelectorAll('.tab')[0].classList.add('active');
         document.getElementById('chatTab').classList.add('active');
-        document.getElementById('messageInput').focus();
+        // Focus enlevé pour mode push-to-talk par défaut
+        // document.getElementById('messageInput').focus();
       } else if (tab === 'memory') {
         document.querySelectorAll('.tab')[1].classList.add('active');
         document.getElementById('memoryTab').classList.add('active');
@@ -1413,8 +1627,38 @@
     }
 
     checkHealth();
-    document.getElementById('messageInput').focus();
+    // Focus enlevé pour mode push-to-talk par défaut
+    // document.getElementById('messageInput').focus();
     loadTheme();
+
+    // Push-to-talk avec la barre d'espace
+    document.addEventListener('keydown', (event) => {
+      // Ignorer si on est en train de taper dans l'input
+      if (event.target.id === 'messageInput') return;
+      
+      if (event.code === 'Space' && !spacebarPressed) {
+        event.preventDefault();
+        console.log('🔵 Keydown SPACE - Démarrage enregistrement');
+        spacebarPressed = true;
+        if (!isRecording) {
+          toggleMicrophone();
+        }
+      }
+    });
+
+    document.addEventListener('keyup', (event) => {
+      // Ignorer si on est en train de taper dans l'input
+      if (event.target.id === 'messageInput') return;
+      
+      if (event.code === 'Space' && spacebarPressed) {
+        event.preventDefault();
+        console.log('🔴 Keyup SPACE - Arrêt enregistrement');
+        spacebarPressed = false;
+        if (isRecording) {
+          toggleMicrophone();
+        }
+      }
+    });
   </script>
 </body>
 </html>

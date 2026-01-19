@@ -37,3 +37,7 @@ piper-voices/
 .DS_Store
 Thumbs.db
 .Trash-*
+
+# Certificats SSL
+certs/
+*.pem

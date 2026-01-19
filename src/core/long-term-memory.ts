@@ -1,14 +1,13 @@
-// src/core/long-term-memory.ts - VERSION CORRIGÉE
+// src/core/long-term-memory.ts - VERSION CORRIGÉE COMPLÈTE
 import { promises as fs } from 'fs';
 import path from 'path';
 
 export interface Fact {
   id: string;
-  subject: string;       // "Patrick", "Utilisateur"
-  predicate: string;     // "possède", "aime", "déteste", "habite"
-  objects: string[];     // Liste d'objets (multi-valeur)
-  isMultiValue: boolean; // Indique si ce prédicat supporte plusieurs valeurs
-  // Compatibilité avec l'ancien format
+  subject: string;
+  predicate: string;
+  objects: string[];
+  isMultiValue: boolean;
   key?: string;
   value?: string;
   object?: string;
@@ -19,249 +18,170 @@ export interface Fact {
 
 export class LongTermMemory {
   private memoryPath: string;
-  private facts: Map<string, Fact>;
-  private static factCounter = 0;
-  
-  // Prédicats qui supportent plusieurs valeurs
-  private static MULTI_VALUE_PREDICATES = ['aime', 'déteste', 'possède', 'collectionne'];
+  private facts: Map<string, Fact> = new Map();
+  private vectorCache: Map<string, number[]> = new Map();
+  private ollama: any = null;  // Stockage de l'instance Ollama
 
   constructor() {
     this.memoryPath = path.join(process.cwd(), 'data', 'memories.json');
-    this.facts = new Map();
   }
 
-  async initialize() {
-    const dataDir = path.dirname(this.memoryPath);
-    console.log(`📂 Initialisation mémoire : ${dataDir}`);
+  async initialize(ollama: any) {
+    this.ollama = ollama;  // Sauvegarde l'instance Ollama pour usage ultérieur
 
     try {
-      await fs.mkdir(dataDir, { recursive: true });
+      const data = await fs.readFile(this.memoryPath, 'utf-8');
+      const factsArray: Fact[] = JSON.parse(data);
 
-      try {
-        const data = await fs.readFile(this.memoryPath, 'utf-8');
-        const factsArray: Fact[] = JSON.parse(data);
+      this.facts.clear();
+      this.vectorCache.clear();
 
-        // Migration automatique de l'ancien format vers le nouveau
-        factsArray.forEach(fact => {
-          // Migration du format ancien vers nouveau
-          if (!fact.predicate && fact.key) {
-            fact.predicate = fact.key;
-          }
-          
-          // Migration object (string) vers objects (array)
-          if (!fact.objects) {
-            if (fact.object) {
-              fact.objects = [fact.object];
-            } else if (fact.value) {
-              fact.objects = [fact.value];
-            } else {
-              fact.objects = [];
-            }
-          }
-          
-          // Déterminer si multi-valeur
-          if (fact.isMultiValue === undefined) {
-            fact.isMultiValue = LongTermMemory.MULTI_VALUE_PREDICATES.includes(fact.predicate);
-          }
-          
-          this.facts.set(fact.id, fact);
-        });
-
-        console.log(`💾 ${this.facts.size} souvenirs chargés.`);
-      } catch (e) {
-        console.log('💾 Création du fichier de mémoire...');
-        await this.saveToFile();
+      console.log(`⏳ Vectorisation de ${factsArray.length} faits en cours...`);
+      for (const fact of factsArray) {
+        this.facts.set(fact.id, fact);
+        const vector = await this.generateEmbedding(ollama, fact);
+        this.vectorCache.set(fact.id, vector);
       }
-    } catch (error) {
-      console.error(`❌ Erreur d'initialisation mémoire : ${error}`);
+      console.log(`✅ Mémoire prête : ${this.facts.size} faits, ${this.vectorCache.size} vecteurs.`);
+    } catch (e) {
+      console.log('💾 Création du fichier de mémoire...');
+      await fs.mkdir(path.dirname(this.memoryPath), { recursive: true });
+      await this.saveToFile();
     }
   }
+
+  async generateEmbedding(ollama: any, input: Fact | string): Promise<number[]> {
+    const text = typeof input === 'string'
+      ? input
+      : `${input.subject} ${input.predicate} ${input.objects.join(', ')}`;
+
+    try {
+      const response = await ollama.embeddings({
+        model: 'all-minilm',
+        prompt: text
+      });
+      return response.embedding;
+    } catch (error) {
+      console.error('❌ Erreur génération embedding:', error);
+      // Retourne un vecteur vide en cas d'erreur pour ne pas bloquer
+      return new Array(384).fill(0); // all-minilm produit des vecteurs de 384 dimensions
+    }
+  }
+
+  async vectorSearch(queryVector: number[], threshold = 0.5): Promise<Fact[]> {
+    const allFacts = Array.from(this.facts.values());
+
+    // Vérification préalable : tous les faits ont-ils un vecteur ?
+    const missingVectors: string[] = [];
+    for (const fact of allFacts) {
+      if (!this.vectorCache.has(fact.id)) {
+        missingVectors.push(fact.id);
+      }
+    }
+
+    // Si des vecteurs manquent, les régénérer AVANT la recherche
+    if (missingVectors.length > 0 && this.ollama) {
+      console.log(`⚠️  ${missingVectors.length} vecteur(s) manquant(s), régénération...`);
+      for (const factId of missingVectors) {
+        const fact = this.facts.get(factId);
+        if (fact) {
+          const vector = await this.generateEmbedding(this.ollama, fact);
+          this.vectorCache.set(factId, vector);
+          console.log(`✅ Vecteur régénéré pour ${factId}`);
+        }
+      }
+    }
+
+    const scoredFacts = allFacts.map(fact => {
+      let score = 0;
+      const factVector = this.vectorCache.get(fact.id);
+
+      if (factVector && Array.isArray(factVector)) {
+        try {
+          score = cosineSimilarity(queryVector, factVector);
+        } catch (err) {
+          console.error(`Erreur calcul similarité pour ${fact.id}:`, err);
+          score = 0;
+        }
+      }
+
+      return { fact, score };
+    });
+
+    const results = scoredFacts
+      .filter(item => item.score >= threshold)
+      .sort((a, b) => b.score - a.score)
+      .map(item => item.fact);
+
+    console.log(`🔍 Recherche vectorielle: ${results.length}/${allFacts.length} faits trouvés (seuil: ${threshold})`);
+
+    return results;
+  }
+
+  // --- SAUVEGARDE ET MODIFICATION ---
 
   private async saveToFile() {
     const factsArray = Array.from(this.facts.values());
     await fs.writeFile(this.memoryPath, JSON.stringify(factsArray, null, 2));
   }
 
-  /**
-   * Ajoute ou met à jour un fait avec support multi-valeurs
-   * @param predicate - L'action/relation (ex: "possède", "aime")
-   * @param object - L'objet (ex: "un chat nommé Belfégor")
-   * @param subject - Le sujet (défaut: "Utilisateur")
-   */
-  async add(
-    predicate: string,
-    object: string,
-    subject: string = 'Utilisateur',
-    context?: string
-  ): Promise<Fact> {
-    const allFacts = Array.from(this.facts.values());
-
-    // 1. Détection du nom réel de l'utilisateur
-    let targetSubject = subject;
-    const userNameFact = allFacts.find(
-      f => f.subject === 'Utilisateur' &&
-           (f.predicate === 's\'appelle' || f.key === 'nom')
-    );
-
-    if (userNameFact && targetSubject === 'Utilisateur') {
-      targetSubject = userNameFact.objects[0] || userNameFact.value || 'Utilisateur';
-    }
-
-    // 2. Vérifier si c'est un prédicat multi-valeur
-    const isMultiValue = LongTermMemory.MULTI_VALUE_PREDICATES.includes(predicate);
-
-    // 3. Chercher un fait existant avec le même sujet + prédicat
-    const existingFact = allFacts.find(f => {
-      const fPredicate = f.predicate || f.key || '';
-      return f.subject.toLowerCase() === targetSubject.toLowerCase() &&
-             fPredicate.toLowerCase() === predicate.toLowerCase();
-    });
-
-    // 4. Si le fait existe et c'est multi-valeur, ajouter à la liste
-    if (existingFact && isMultiValue) {
-      const objectLower = object.toLowerCase();
-      const alreadyExists = existingFact.objects.some(
-        obj => obj.toLowerCase() === objectLower
-      );
-
-      if (!alreadyExists) {
-        existingFact.objects.push(object);
-        existingFact.updatedAt = new Date().toISOString();
-        this.facts.set(existingFact.id, existingFact);
-        await this.saveToFile();
-        console.log('➕ Ajout à un fait existant:', object);
-        return existingFact;
-      } else {
-        existingFact.updatedAt = new Date().toISOString();
-        this.facts.set(existingFact.id, existingFact);
-        await this.saveToFile();
-        console.log('⏩ Valeur déjà existante, mise à jour de la date');
-        return existingFact;
-      }
-    }
-
-    // 5. Si le fait existe mais n'est pas multi-valeur, mettre à jour
-    if (existingFact && !isMultiValue) {
-      existingFact.objects = [object];
-      existingFact.object = object;  // Compatibilité
-      existingFact.value = object;   // Compatibilité
-      existingFact.updatedAt = new Date().toISOString();
-      this.facts.set(existingFact.id, existingFact);
-      await this.saveToFile();
-      console.log('🔄 Mise à jour d\'un fait existant');
-      return existingFact;
-    }
-
-    // 6. Sinon, créer un nouveau fait
-    const fact: Fact = {
-      id: `fact_${Date.now()}_${++LongTermMemory.factCounter}`,
-      subject: targetSubject,
+  async add(predicate: string, object: string, subject: string, ollama: any): Promise<Fact> {
+    const id = `fact_${Date.now()}`;
+    const newFact: Fact = {
+      id,
+      subject,
       predicate,
       objects: [object],
-      isMultiValue,
-      key: predicate,      // Compatibilité
-      value: object,       // Compatibilité
-      object: object,      // Compatibilité
-      context,
+      isMultiValue: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-    this.facts.set(fact.id, fact);
+    // Mise à jour de la Map des faits
+    this.facts.set(id, newFact);
+
+    // IMPORTANT: Générer ET sauvegarder le vecteur immédiatement
+    const vector = await this.generateEmbedding(ollama, newFact);
+    this.vectorCache.set(id, vector);
+
+    console.log(`✅ Fait ajouté: ${subject} ${predicate} ${object} (vecteur: ${vector.length}D)`);
+
     await this.saveToFile();
-    console.log('✅ Nouveau fait créé:', fact);
-    return fact;
+    return newFact;
   }
 
-  /**
-   * Met à jour un fait existant
-   */
-  async update(id: string, predicate: string, objects: string[] | string, subject?: string): Promise<Fact | null> {
+  async update(id: string, predicate: string, objects: string[], subject: string, ollama: any): Promise<Fact | null> {
     const fact = this.facts.get(id);
-    if (!fact) return null;
+    if (!fact) {
+      console.log(`❌ Fait ${id} introuvable pour mise à jour`);
+      return null;
+    }
 
-    // Normalise les objets en tableau
-    const objectsArray = Array.isArray(objects) ? objects : [objects];
-    
     fact.predicate = predicate;
-    fact.objects = objectsArray;
-    fact.object = objectsArray[0];      // Compatibilité (première valeur)
-    if (subject) fact.subject = subject;
-    fact.key = predicate;               // Compatibilité
-    fact.value = objectsArray[0];       // Compatibilité (première valeur)
+    fact.objects = objects;
+    fact.subject = subject;
     fact.updatedAt = new Date().toISOString();
 
-    this.facts.set(id, fact);
+    // IMPORTANT: Recalculer le vecteur car le contenu a changé
+    const vector = await this.generateEmbedding(ollama, fact);
+    this.vectorCache.set(id, vector);
+
+    console.log(`✅ Fait mis à jour: ${subject} ${predicate} ${objects.join(', ')}`);
+
     await this.saveToFile();
     return fact;
   }
 
-  async getFactsForSubject(subjectName: string): Promise<Fact[]> {
-    const all = Array.from(this.facts.values());
-    return all.filter(f =>
-      f.subject.toLowerCase() === subjectName.toLowerCase() ||
-      f.subject === 'Utilisateur'
-    );
-  }
+  async delete(id: string): Promise<boolean> {
+    const existed = this.facts.delete(id);
+    this.vectorCache.delete(id); // Nettoyage du cache
 
-  async search(query: string): Promise<Fact[]> {
-    const lowerQuery = query.toLowerCase();
-    
-    // Nettoyer les apostrophes et caractères spéciaux
-    const cleanQuery = lowerQuery
-      .replace(/['']/g, ' ') // d'animaux → d animaux
-      .replace(/[^\w\sàâäéèêëïîôùûüÿç-]/g, ' '); // autres caractères → espaces
-    
-    // Extraire les mots significatifs (enlever mots vides)
-    const stopWords = ['je', 'tu', 'il', 'elle', 'nous', 'vous', 'ils', 'elles',
-                       'le', 'la', 'les', 'un', 'une', 'des', 'de', 'd', 'du', 'au',
-                       'mon', 'ma', 'mes', 'ton', 'ta', 'tes', 'son', 'sa', 'ses',
-                       'quel', 'quelle', 'quels', 'quelles', 'que', 'qui', 'quoi',
-                       'est', 'sont', 'suis', 'es', 'sommes', 'être', 'avoir',
-                       'a', 'ai', 'as', 'avons', 'avez', 'ont',
-                       'combien', 'nombre'];
-    
-    let keywords = cleanQuery
-      .split(/\s+/)
-      .filter(word => word.length > 2 && !stopWords.includes(word));
-    
-    console.log(`🔎 Keywords extraits: [${keywords.join(', ')}]`);
-    
-    // Ajouter les singuliers/pluriels des mots-clés
-    const expandedKeywords = new Set<string>();
-    keywords.forEach(word => {
-      expandedKeywords.add(word);
-      // Singulier → pluriel
-      if (!word.endsWith('s')) expandedKeywords.add(word + 's');
-      // Pluriel → singulier
-      if (word.endsWith('s') && word.length > 3) expandedKeywords.add(word.slice(0, -1));
-      // Variantes animaux (tous les types connus)
-      if (word === 'animaux' || word === 'animal') {
-        expandedKeywords.add('animal');
-        expandedKeywords.add('chat');
-        expandedKeywords.add('chien');
-        expandedKeywords.add('souris');
-        expandedKeywords.add('oiseau');
-        expandedKeywords.add('cheval');
-        expandedKeywords.add('lapin');
-        expandedKeywords.add('poisson');
-      }
-    });
-    
-    console.log(`🔎 Expanded keywords: [${Array.from(expandedKeywords).slice(0, 10).join(', ')}...]`);
-    
-    if (expandedKeywords.size === 0) {
-      return Array.from(this.facts.values());
+    if (existed) {
+      await this.saveToFile();
+      console.log('🗑️ Fait supprimé:', id);
     }
-    
-    return Array.from(this.facts.values()).filter(fact => {
-      const predicate = fact.predicate || fact.key || '';
-      const objectsStr = fact.objects.join(' ');
-      const searchText = `${fact.subject} ${predicate} ${objectsStr}`.toLowerCase();
-      
-      // Retourne vrai si au moins un mot-clé est trouvé
-      return Array.from(expandedKeywords).some(keyword => searchText.includes(keyword));
-    });
+
+    return existed;
   }
 
   async getAll(): Promise<Fact[]> {
@@ -270,46 +190,33 @@ export class LongTermMemory {
     );
   }
 
-  async delete(id: string): Promise<boolean> {
-    const existed = this.facts.delete(id);
-    if (existed) {
-      await this.saveToFile();
-      console.log('🗑️ Fait supprimé:', id);
-    }
-    return existed;
+  // Méthode utilitaire pour vérifier l'état du cache
+  getCacheStatus(): { totalFacts: number; cachedVectors: number; missingVectors: number } {
+    const totalFacts = this.facts.size;
+    const cachedVectors = this.vectorCache.size;
+    const missingVectors = totalFacts - cachedVectors;
+
+    return { totalFacts, cachedVectors, missingVectors };
+  }
+}
+
+// Fonction utilitaire pour la similarité cosinus
+function cosineSimilarity(vecA: number[], vecB: number[]): number {
+  if (vecA.length !== vecB.length) {
+    console.warn(`⚠️  Dimensions différentes: ${vecA.length} vs ${vecB.length}`);
+    return 0;
   }
 
-  /**
-   * Génère un résumé textuel au format SPO avec groupement intelligent
-   */
-  async getSummary(): Promise<string> {
-    const facts = await this.getAll();
-    if (facts.length === 0) return "Aucun souvenir enregistré.";
+  let dotProduct = 0;
+  let mA = 0;
+  let mB = 0;
 
-    const grouped = facts.reduce((acc, fact) => {
-      if (!acc[fact.subject]) acc[fact.subject] = {};
-
-      const predicate = fact.predicate || fact.key || '?';
-      
-      if (!acc[fact.subject][predicate]) {
-        acc[fact.subject][predicate] = [];
-      }
-      
-      acc[fact.subject][predicate].push(...fact.objects);
-      return acc;
-    }, {} as Record<string, Record<string, string[]>>);
-
-    return Object.entries(grouped)
-      .map(([subject, predicates]) => {
-        const subjectLabel = subject === 'Utilisateur' ? 'L\'utilisateur' : subject;
-        const lines = Object.entries(predicates).map(([pred, objs]) => {
-          if (objs.length > 1) {
-            return `  - ${pred} : ${objs.join(', ')}`;
-          }
-          return `  - ${pred} ${objs[0]}`;
-        });
-        return `${subjectLabel} :\n${lines.join('\n')}`;
-      })
-      .join('\n\n');
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    mA += vecA[i] * vecA[i];
+    mB += vecB[i] * vecB[i];
   }
+
+  const denominator = Math.sqrt(mA) * Math.sqrt(mB);
+  return denominator === 0 ? 0 : dotProduct / denominator;
 }

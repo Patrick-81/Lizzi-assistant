@@ -1,12 +1,13 @@
-// src/core/assistant.ts
+// src/core/assistant.ts - VERSION CORRIGÉE COMPLÈTE
 import 'dotenv/config';
 import { Ollama } from 'ollama';
 import { SYSTEM_PROMPT } from './personality.js';
 import { ConversationMemory } from './memory.js';
-import { LongTermMemory } from './long-term-memory.js';
+import { LongTermMemory, Fact } from './long-term-memory.js';
 import { MemoryDetector } from './memory-detector.js';
 import { SemanticExtractor } from './semantic-extractor.js';
 import { ToolSystem } from './tools.js';
+
 
 export class Assistant {
   private ollama: Ollama;
@@ -24,245 +25,342 @@ export class Assistant {
     this.ollama = new Ollama({ host: ollamaHost });
     this.model = process.env.MODEL_NAME || 'mistral';
     this.memory = new ConversationMemory();
-    
-    // Utilise l'instance partagée de mémoire long terme
+
     if (!Assistant.sharedLongTermMemory) {
       Assistant.sharedLongTermMemory = new LongTermMemory();
     }
     this.longTermMemory = Assistant.sharedLongTermMemory;
-    
+
     this.memoryDetector = new MemoryDetector();
     this.semanticExtractor = new SemanticExtractor(this.ollama, this.model);
     this.toolSystem = new ToolSystem();
   }
 
   async initialize() {
-    await this.longTermMemory.initialize();
-    
-    // Vérifier si on connaît le prénom de l'utilisateur
-    const userName = await this.getUserName();
-    if (!userName) {
-      this.hasAskedName = false;
-    }
+    await this.longTermMemory.initialize(this.ollama);
   }
 
   private async getUserName(): Promise<string | null> {
     const facts = await this.longTermMemory.getAll();
     const nameFact = facts.find(
-      f => (f.subject === 'Utilisateur' || f.subject.toLowerCase() === 'utilisateur') &&
-           (f.predicate === 's\'appelle' || f.predicate === 'nom' || f.key === 'nom')
+      f => (f.subject.toLowerCase() === 'utilisateur') &&
+           (f.predicate === 's\'appelle' || f.predicate === 'nom')
     );
     return nameFact?.objects[0] || null;
   }
 
   private detectToolCall(text: string): { tool: string; params: any } | null {
-    // Cherche un bloc JSON dans la réponse
     const jsonMatch = text.match(/```json\s*(\{[\s\S]*?\})\s*```/);
     if (!jsonMatch) {
-      // Essaie sans les backticks
       const directMatch = text.match(/\{[\s\S]*"tool"[\s\S]*\}/);
       if (!directMatch) return null;
-      try {
-        return JSON.parse(directMatch[0]);
-      } catch {
-        return null;
+      try { return JSON.parse(directMatch[0]); } catch { return null; }
+    }
+    try { return JSON.parse(jsonMatch[1]); } catch { return null; }
+  }
+
+  /**
+   * Élargit la requête pour améliorer la recherche vectorielle
+   */
+  private expandQuery(query: string): string {
+    const lowerQuery = query.toLowerCase();
+
+    // Questions sur le nombre d'animaux
+    if (/combien|nombre|quantité/i.test(query) && /animaux|animal/i.test(query)) {
+      return `${query} chat chien canari souris oiseau poisson lapin possède a nommé`;
+    }
+
+    // Questions sur les noms d'animaux
+    if (/comment.*appelle|nom de|quel.*nom/i.test(query)) {
+      const animalMatch = query.match(/(chat|chien|canari|souris|oiseau|lapin|poisson)/i);
+      if (animalMatch) {
+        return `${query} a un ${animalMatch[0]} nommé possède ${animalMatch[0]}`;
       }
     }
 
-    try {
-      return JSON.parse(jsonMatch[1]);
-    } catch {
-      return null;
+    // Questions sur ce que l'utilisateur aime
+    if (/qu'est-ce que.*aime|ce que.*aime|mes.*préférés/i.test(query)) {
+      return `${query} aime préfère adore apprécie`;
     }
+
+    return query;
   }
 
   async chat(userMessage: string): Promise<string> {
-    // Récupérer le nom de l'utilisateur pour le contexte
+    const startTime = Date.now();
     const userName = await this.getUserName();
-    
-    // Vérifier si on doit demander le prénom (uniquement au premier message)
-    if (!userName && !this.hasAskedName && this.memory.getMessages().length === 0) {
+
+    // 1. BLOCAGE : Si on ne connaît pas le nom, on le demande
+    if (!userName && !this.hasAskedName) {
       this.hasAskedName = true;
-      const greeting = "Bonjour ! 😊 Avant de commencer, j'aimerais savoir comment tu t'appelles ?";
+      const greeting = "Bonjour ! 😊 Avant que nous fassions plus ample connaissance, comment t'appelles-tu ?";
       this.memory.addMessage('assistant', greeting);
       return greeting;
     }
 
-    // Vérifie si c'est une demande de rappel de souvenirs
-    if (this.memoryDetector.shouldRecall(userMessage)) {
-      const summary = await this.longTermMemory.getSummary();
-      this.memory.addMessage('user', userMessage);
-      this.memory.addMessage('assistant', summary);
-      return summary;
+    // 2. Si l'utilisateur vient de donner son nom
+    if (!userName && this.hasAskedName) {
+      const triple = await this.semanticExtractor.extractTriple(userMessage);
+      const extractedName = triple?.object || userMessage.trim();
+
+      await this.longTermMemory.add("s'appelle", extractedName, "Utilisateur", this.ollama);
+      this.hasAskedName = false;
+      return `Enchanté ${extractedName} ! Je prends note. Comment puis-je t'aider ?`;
     }
 
-    // Détection prioritaire de l'identité (même sans mot-clé "mémorise")
-    const identityMatch = userMessage.match(/(?:je m'appelle|mon nom est|je suis)\s+([A-ZÀ-ÿ\w-]+)/i);
-    if (identityMatch) {
-      await this.longTermMemory.add(
-        's\'appelle',
-        identityMatch[1].trim(),
-        'Utilisateur',
-        userMessage
+    // 3. MÉMORISATION : Vérifie si l'utilisateur demande d'enregistrer quelque chose
+    console.log('🔍 Vérification mémorisation pour:', userMessage);
+
+    if (this.memoryDetector.detect(userMessage)) {
+      console.log('✅ Détection mémorisation activée');
+
+      const cleanedMessage = this.memoryDetector.cleanMessage(userMessage);
+      console.log('🧹 Message nettoyé:', cleanedMessage);
+
+      const triple = await this.semanticExtractor.extractTriple(cleanedMessage, userName || undefined);
+      console.log('📝 Triplet extrait:', triple);
+
+      if (triple && triple.predicate !== 'inconnu') {
+        // Recherche si un fait similaire existe déjà
+        const queryForExisting = await this.longTermMemory.generateEmbedding(
+          this.ollama,
+          `${triple.subject} ${triple.predicate}`
+        );
+        const existingFacts = await this.longTermMemory.vectorSearch(queryForExisting, 0.7);
+        const duplicate = existingFacts.find(f =>
+          f.subject.toLowerCase() === triple.subject.toLowerCase() &&
+          f.predicate.toLowerCase() === triple.predicate.toLowerCase()
+        );
+
+        if (duplicate && !duplicate.objects.includes(triple.object)) {
+          console.log(`🔄 Mise à jour: ${duplicate.predicate}`);
+          await this.longTermMemory.update(
+            duplicate.id,
+            triple.predicate,
+            [triple.object],
+            triple.subject,
+            this.ollama
+          );
+        } else if (!duplicate) {
+          console.log(`🆕 Nouveau souvenir: ${triple.subject} ${triple.predicate} ${triple.object}`);
+          await this.longTermMemory.add(
+            triple.predicate,
+            triple.object,
+            triple.subject,
+            this.ollama
+          );
+        } else {
+          console.log('⏭️ Fait déjà existant, pas de modification');
+        }
+
+        // Confirmation à l'utilisateur
+        return `C'est noté ! Je me souviendrai que ${triple.subject} ${triple.predicate} ${triple.object}.`;
+      } else {
+        console.log('⚠️ Impossible d\'extraire un triplet valide');
+      }
+    } else {
+      console.log('⭕ Pas de mot-clé de mémorisation détecté');
+    }
+
+    // 4. RECHERCHE SÉMANTIQUE avec requête élargie
+    const t1 = Date.now();
+    const expandedQuery = this.expandQuery(userMessage);
+    console.log('🔎 Requête élargie:', expandedQuery);
+
+    const queryVector = await this.longTermMemory.generateEmbedding(this.ollama, expandedQuery);
+    console.log(`⏱️  Embedding généré en ${Date.now() - t1}ms`);
+    
+    const t2 = Date.now();
+    let relevantFacts = await this.longTermMemory.vectorSearch(queryVector, 0.35); // Seuil baissé à 0.35 pour meilleure couverture
+    console.log(`⏱️  Recherche vectorielle en ${Date.now() - t2}ms`);
+    
+    const cacheStatus = this.longTermMemory.getCacheStatus();
+    console.log(`📊 Cache: ${cacheStatus.cachedVectors}/${cacheStatus.totalFacts} vecteurs (${cacheStatus.missingVectors} manquants)`);
+
+    // Fallback 1: Questions sur l'identité (nom, prénom)
+    if (relevantFacts.length === 0 && /comment.*appelle|quel.*nom|mon nom|mon prénom/i.test(userMessage)) {
+      console.log('🔄 Fallback: recherche faits identité');
+      const allFacts = await this.longTermMemory.getAll();
+      relevantFacts = allFacts.filter(f =>
+        f.predicate === "s'appelle" || f.predicate === "nom" || f.subject === "Utilisateur"
       );
     }
 
-    // Vérifie si c'est une instruction de mémorisation - EXTRACTION SÉMANTIQUE LLM
-    if (this.memoryDetector.shouldMemorize(userMessage)) {
-      console.log('📝 Détection mémorisation - extraction sémantique via LLM...');
-      
-      const triple = await this.semanticExtractor.extractTriple(userMessage, userName || undefined);
-      
-      if (triple) {
-        console.log('✅ Triplet extrait:', triple);
-        await this.longTermMemory.add(
-          triple.predicate,
-          triple.object,
-          triple.subject,
-          userMessage
+    // Fallback 2: Questions générales "que sais-tu de moi"
+    if (relevantFacts.length === 0 && /que sais.*moi|connais.*moi|sais de moi/i.test(userMessage)) {
+      console.log('🔄 Fallback: récupère TOUS les faits utilisateur');
+      const allFacts = await this.longTermMemory.getAll();
+      relevantFacts = allFacts.filter(f => {
+        const sub = f.subject.toLowerCase();
+        return sub === 'patrick' || sub === 'utilisateur' || sub === userName?.toLowerCase();
+      });
+    }
+
+    // Fallback 3: Si question sur animaux et pas de résultats, cherche TOUS les faits d'animaux
+    if (relevantFacts.length === 0 && /animaux|animal|chat|chien|canari|souris|oiseau/i.test(userMessage)) {
+      console.log('🔄 Fallback: recherche tous les animaux');
+      const allFacts = await this.longTermMemory.getAll();
+      relevantFacts = allFacts.filter(f =>
+        /chat|chien|canari|souris|oiseau|animal|possède|a un|nommé/i.test(f.predicate) ||
+        /chat|chien|canari|souris|oiseau|Belphégor|Pixel|CuiCui|Mimi/i.test(f.objects.join(' '))
+      );
+    }
+
+    // Fallback 4: Questions sur les goûts (aime, préfère)
+    if (relevantFacts.length === 0 && /aime|préfère|goûts|aliments|nourriture/i.test(userMessage)) {
+      console.log('🔄 Fallback: recherche tous les goûts');
+      const allFacts = await this.longTermMemory.getAll();
+      relevantFacts = allFacts.filter(f =>
+        f.predicate === 'aime' || f.predicate === 'préfère' || f.predicate === 'adore'
+      );
+    }
+
+    console.log(`📚 ${relevantFacts.length} faits pertinents trouvés`);
+
+    // 5. Construction du contexte mémoire EXPLICITE
+    let memoryContext = "\n\n═══════════════════════════════════════";
+    memoryContext += "\n        MÉMOIRE LONG TERME";
+    memoryContext += "\n═══════════════════════════════════════";
+
+    if (userName) {
+      memoryContext += `\n\n👤 Utilisateur : ${userName}`;
+    }
+
+    if (relevantFacts.length > 0) {
+      memoryContext += "\n\n📋 FAITS CONNUS (UTILISE CES INFORMATIONS EXACTEMENT) :\n";
+
+      // Groupe par catégorie pour faciliter le comptage
+      const grouped = relevantFacts.reduce((acc, f) => {
+        let category = f.predicate;
+
+        // Simplifie les catégories
+        if (/chat.*nommé|a un chat/i.test(category)) category = 'chat';
+        else if (/chien.*nommé|a un chien/i.test(category)) category = 'chien';
+        else if (/canari.*nommé|a un canari/i.test(category)) category = 'canari';
+        else if (/souris.*nommé|a une souris/i.test(category)) category = 'souris';
+        else if (/aime/i.test(category)) category = 'aime';
+
+        if (!acc[category]) acc[category] = [];
+        acc[category].push(...f.objects);
+        return acc;
+      }, {} as Record<string, string[]>);
+
+      Object.entries(grouped).forEach(([cat, items]) => {
+        const uniqueItems = [...new Set(items)];
+        if (uniqueItems.length > 1) {
+          memoryContext += `  • ${cat} : ${uniqueItems.join(', ')} [TOTAL: ${uniqueItems.length}]\n`;
+        } else {
+          memoryContext += `  • ${cat} : ${uniqueItems[0]}\n`;
+        }
+      });
+
+      // Si question sur nombre d'animaux, compte explicitement
+      if (/combien.*animaux/i.test(userMessage)) {
+        const animalCategories = Object.keys(grouped).filter(k =>
+          ['chat', 'chien', 'canari', 'souris', 'oiseau', 'lapin', 'poisson'].includes(k.toLowerCase())
         );
-      } else {
-        console.log('⚠️ Aucun triplet extrait - fallback sur regex');
-        // Fallback sur l'ancienne méthode si LLM échoue
-        const memoryInstruction = this.memoryDetector.extractMemoryInstruction(userMessage);
-        if (memoryInstruction) {
-          await this.longTermMemory.add(
-            memoryInstruction.predicate,
-            memoryInstruction.object,
-            memoryInstruction.subject,
-            userMessage
-          );
+        if (animalCategories.length > 0) {
+          memoryContext += `\n⚠️  IMPORTANT : L'utilisateur a ${animalCategories.length} animaux au total.\n`;
         }
       }
+    } else {
+      memoryContext += "\n\n❌ AUCUN FAIT PERTINENT dans la mémoire pour cette question.";
+      memoryContext += "\n   → Réponds clairement : \"Je n'ai pas cette information en mémoire.\"\n";
     }
 
-    // Récupère les souvenirs pertinents
-    const relevantMemories = await this.longTermMemory.search(userMessage);
-    let memoryContext = '';
+    memoryContext += "\n═══════════════════════════════════════\n";
 
-    console.log(`🔍 Recherche "${userMessage}" → ${relevantMemories.length} souvenirs trouvés`);
-    relevantMemories.forEach(m => console.log(`  - ${m.subject} ${m.predicate}: ${m.objects.join(', ')}`));
-
-    // Ajouter le nom de l'utilisateur en premier dans le contexte
-    if (userName) {
-      memoryContext = `\n\nCONTEXTE UTILISATEUR :\n- Tu parles avec ${userName}\n`;
-    }
-
-    if (relevantMemories.length > 0) {
-      memoryContext += '\nSOUVENIRS PERTINENTS :\n';
-      relevantMemories.slice(0, 5).forEach(mem => {
-        const objects = mem.objects.join(', ');
-        // Normalise "Utilisateur" vers le nom réel si connu
-        const displaySubject = (mem.subject === 'Utilisateur' && userName) ? userName : mem.subject;
-        const contextLine = `- ${displaySubject} ${mem.predicate}: ${objects}\n`;
-        memoryContext += contextLine;
-        console.log(`📌 Ajout contexte: ${contextLine.trim()}`);
-      });
-    }
-
-    // Ajoute la description des outils disponibles
-    const toolsDescription = this.toolSystem.getToolDescriptions();
-
+    // 6. Préparation des messages pour Ollama
     this.memory.addMessage('user', userMessage);
 
-    const messages = [
-      {
-        role: 'system',
-        content: SYSTEM_PROMPT + memoryContext + '\n\n' + toolsDescription
-      },
-      ...this.memory.getMessages()
-    ];
+    const t3 = Date.now();
+    const response = await this.ollama.chat({
+      model: this.model,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT + memoryContext },
+        ...this.memory.getMessages()
+      ],
+      options: {
+        temperature: 0.3,
+        num_predict: 150,  // Limite la réponse à 150 tokens max pour plus de rapidité
+        stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant']
+      }
+    });
+    console.log(`⏱️  Génération LLM en ${Date.now() - t3}ms`);
 
-    console.log('📤 Prompt système envoyé au LLM:');
-    console.log('='.repeat(80));
-    console.log(messages[0].content);
-    console.log('='.repeat(80));
-    console.log(`📊 Contexte mémoire (${memoryContext.length} chars)`);
+    let assistantMessage = response.message.content;
 
-    try {
-      const response = await this.ollama.chat({
+    // 7. Nettoyage des marqueurs système
+    assistantMessage = assistantMessage
+      .replace(/###\s*(Assistant|User|System|Utilisateur|LIZZI):?/gi, '')
+      .replace(/^(Assistant|Lizzi|Réponse)[\s:]+/gi, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    // Garde seulement la première réponse si plusieurs tours
+    const firstResponse = assistantMessage.split(/\n(?:User|Assistant|Utilisateur):/i)[0];
+    if (firstResponse.length > 0) {
+      assistantMessage = firstResponse.trim();
+    }
+
+    // 8. Gestion des outils
+    const toolCall = this.detectToolCall(assistantMessage);
+    if (toolCall && toolCall.tool) {
+      const toolResult = await this.toolSystem.executeTool(toolCall.tool, toolCall.params);
+      const followUp = await this.ollama.chat({
         model: this.model,
-        messages: messages,
-        stream: false,
-        options: {
-          temperature: 0.8,
-          top_p: 0.9
-        }
-      });
-
-      let assistantMessage = response.message.content;
-
-      // Détecte si Lizzi veut utiliser un outil
-      const toolCall = this.detectToolCall(assistantMessage);
-
-      if (toolCall && toolCall.tool && toolCall.params) {
-        // Exécute l'outil
-        const toolResult = await this.toolSystem.executeTool(toolCall.tool, toolCall.params);
-
-        // Demande à Lizzi de formuler une réponse avec le résultat
-        const followUpMessages = [
-          ...messages,
+        messages: [
+          ...this.memory.getMessages(),
           { role: 'assistant', content: assistantMessage },
           {
             role: 'user',
-            content: `Résultat de l'outil ${toolCall.tool} : ${JSON.stringify(toolResult, null, 2)}\n\nFormule maintenant une réponse naturelle et claire pour l'utilisateur avec ce résultat. Ne mentionne pas le JSON ni l'outil, réponds simplement de façon conversationnelle.`
+            content: `Résultat de l'outil ${toolCall.tool} : ${JSON.stringify(toolResult, null, 2)}\n\nFormule une réponse naturelle avec ce résultat.`
           }
-        ];
-
-        const finalResponse = await this.ollama.chat({
-          model: this.model,
-          messages: followUpMessages,
-          stream: false,
-          options: {
-            temperature: 0.8,
-            top_p: 0.9
-          }
-        });
-
-        assistantMessage = finalResponse.message.content;
-      }
-
-      this.memory.addMessage('assistant', assistantMessage);
-      return assistantMessage;
-
-    } catch (error) {
-      throw new Error(`Erreur Ollama: ${error}`);
+        ],
+        options: { temperature: 0.3 }
+      });
+      assistantMessage = followUp.message.content
+        .replace(/###\s*(Assistant|User|System):?/gi, '')
+        .trim();
     }
+
+    this.memory.addMessage('assistant', assistantMessage);
+    console.log(`⏱️  TEMPS TOTAL: ${Date.now() - startTime}ms`);
+    return assistantMessage;
   }
 
-  clearMemory() {
+  // --- MÉTHODES API POUR SERVER.TS ---
+
+  clearMemory(): void {
     this.memory.clear();
   }
 
-  async clearLongTermMemory() {
-    const memories = await this.longTermMemory.getAll();
-    for (const mem of memories) {
-      if (mem.id) {
-        await this.longTermMemory.delete(mem.id);
-      }
-    }
-  }
-
-  // Méthodes pour l'API de gestion des faits
-  async getAllFacts() {
+  async getAllFacts(): Promise<Fact[]> {
     return await this.longTermMemory.getAll();
   }
 
-  async saveFact(key: string, value: string, context?: string) {
-    return await this.longTermMemory.add(key, value, 'Utilisateur', context);
+  async searchFacts(query: string): Promise<Fact[]> {
+    const queryVector = await this.longTermMemory.generateEmbedding(this.ollama, query);
+    return await this.longTermMemory.vectorSearch(queryVector);
   }
 
-  async updateFact(id: string, predicate: string, objects: string[] | string, subject?: string) {
-    // Normalise les objets en tableau
+  async saveFact(predicate: string, object: string, subject: string = 'Utilisateur'): Promise<Fact> {
+    return await this.longTermMemory.add(predicate, object, subject, this.ollama);
+  }
+
+  async updateFact(id: string, predicate: string, objects: string[] | string, subject?: string): Promise<Fact | null> {
     const objectsArray = Array.isArray(objects) ? objects : [objects];
-    return await this.longTermMemory.update(id, predicate, objectsArray, subject);
+    return await this.longTermMemory.update(id, predicate, objectsArray, subject || 'Utilisateur', this.ollama);
   }
 
-  async deleteFact(id: string) {
+  async deleteFact(id: string): Promise<boolean> {
     return await this.longTermMemory.delete(id);
   }
 
-  async searchFacts(query: string) {
-    return await this.longTermMemory.search(query);
+  async clearLongTermMemory(): Promise<void> {
+    const facts = await this.longTermMemory.getAll();
+    for (const fact of facts) {
+      await this.longTermMemory.delete(fact.id);
+    }
   }
 }

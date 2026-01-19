@@ -1,52 +1,79 @@
 // src/core/memory-detector.ts
-// Détecteur de mots-clés pour mémorisation et rappel
-// L'extraction sémantique est maintenant gérée par SemanticExtractor (LLM)
 
-export interface MemoryResult {
-  subject: string;
-  predicate: string;
-  object: string;
-}
+// src/core/memory-detector.ts
 
 export class MemoryDetector {
-  private memoryKeywords = [
-    'souviens-toi', 'souviens', 'mémorise', 'mémorises',
-    'retiens', 'n\'oublie pas', 'n\'oublie', 'noublie',
-    'garde en mémoire', 'rappelle-toi', 'rappelle toi', 'enregistre'
-  ];
-
-  private recallKeywords = [
-    'tu te souviens', 'te rappelles', 'qu\'est-ce que tu sais',
-    'de quoi tu te souviens', 'qu\'as-tu retenu',
-    'qu\'as-tu mémorisé', 'liste tes souvenirs',
-    'montre tes souvenirs', 'tes souvenirs', 'mes souvenirs',
-    'quels sont tes souvenirs', 'que sais-tu de moi',
-    'ce que tu sais sur moi', 'rappelle mes souvenirs',
-    'rappelle-moi mes souvenirs'
+  /**
+   * Liste des verbes d'action indiquant une volonté de stockage
+   */
+  private static readonly ACTION_KEYWORDS = [
+    'mémorise', 'enregistre', 'note', 'retiens', 'souviens-toi',
+    'apprends', 'stocke', 'garde en mémoire', 'inscris'
   ];
 
   /**
-   * Détecte si le message contient un mot-clé de mémorisation
+   * Liste des tournures de phrases impératives ou déclaratives
    */
-  shouldMemorize(text: string): boolean {
-    const lowerText = text.toLowerCase();
-    return this.memoryKeywords.some(keyword => lowerText.includes(keyword));
+  private static readonly PHRASE_PATTERNS = [
+    /^c'est important/i,
+    /^je voudrais que tu te souviennes/i,
+    /^peux-tu noter que/i,
+    /^il faut que tu saches/i,
+    /^retient bien/i
+  ];
+
+  /**
+   * Détecte si l'utilisateur exprime une intention explicite de mémorisation.
+   * @param text Le message de l'utilisateur
+   * @returns boolean
+   */
+  public detect(text: string): boolean {
+    if (!text) return false;
+
+    const normalizedText = text.toLowerCase().trim();
+
+    // 1. Vérification des mots-clés d'action (ex: "Note que...")
+    const hasActionWord = MemoryDetector.ACTION_KEYWORDS.some(keyword =>
+      normalizedText.includes(keyword)
+    );
+
+    if (hasActionWord) return true;
+
+    // 2. Vérification des motifs de phrases (ex: "C'est important, je...")
+    const hasPattern = MemoryDetector.PHRASE_PATTERNS.some(pattern =>
+      pattern.test(normalizedText)
+    );
+
+    if (hasPattern) return true;
+
+    // 3. Cas particulier : Détection de l'identité (toujours mémoriser)
+    // On veut que Lizzi enregistre toujours quand quelqu'un décline son identité
+    const identityPatterns = [
+      /^je m'appelle/i,
+      /^mon nom est/i,
+      /^je suis (.*) et je/i
+    ];
+
+    if (identityPatterns.some(pattern => pattern.test(normalizedText))) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
-   * Détecte si le message est une demande de rappel de souvenirs
+   * Optionnel : Nettoie le message des mots-clés pour faciliter l'extraction
+   * Exemple : "Mémorise que mon chat s'appelle Pixel" -> "mon chat s'appelle Pixel"
    */
-  shouldRecall(text: string): boolean {
-    const lowerText = text.toLowerCase();
-    return this.recallKeywords.some(keyword => lowerText.includes(keyword));
-  }
+  public cleanMessage(text: string): string {
+    let cleaned = text;
+    const verbsToStrip = [...MemoryDetector.ACTION_KEYWORDS, 'que', 'de', 'le fait'];
 
-  /**
-   * @deprecated Utiliser SemanticExtractor.extractTriple() à la place
-   * Conservé uniquement pour compatibilité/fallback
-   */
-  extractMemoryInstruction(text: string): MemoryResult | null {
-    console.warn('⚠️ extractMemoryInstruction() est obsolète - utiliser SemanticExtractor');
-    return null;
+    verbsToStrip.forEach(word => {
+      const regex = new RegExp(`^${word}\\s+`, 'i');
+      cleaned = cleaned.replace(regex, '');
+    });
+
+    return cleaned.trim();
   }
 }

@@ -24,11 +24,15 @@ Assistant personnel local alimenté par IA avec capacités vocales et mémoire l
 
 - 💬 **Chat conversationnel** avec interface web élégante et responsive
 - 🗣️ **Synthèse vocale** (Text-to-Speech) avec Piper
+- 🎤 **Reconnaissance vocale** (Speech-to-Text) avec Whisper.cpp
+- ⌨️ **Mode Push-to-Talk** - appui sur ESPACE pour parler (mains libres)
 - 🧠 **Mémoire long terme** avec gestion des faits (format SPO)
+- ✏️ **Éditeur de faits** - interface de gestion Sujet-Relation-Objet
 - 🧮 **Calcul mathématique** avancé (opérations, fonctions, etc.)
 - 📅 **Manipulation de dates** (différences, ajouts, formatage)
 - 🔄 **Conversion d'unités** (longueur, poids, température)
 - 🎨 **Affichage Markdown** des réponses avec coloration syntaxique
+- 📋 **Copie de code** en un clic sur les blocs de code
 - 🌙 **Mode sombre** avec switch automatique
 - 📊 **Statistiques système** (CPU, RAM, GPU) en temps réel
 - 🔒 **100% local** - vos données restent privées
@@ -49,7 +53,8 @@ Assistant personnel local alimenté par IA avec capacités vocales et mémoire l
 
 - **Node.js** 18+ ([Télécharger](https://nodejs.org/))
 - **Ollama** avec un modèle LLM ([Installation](https://ollama.ai/))
-- **Piper** pour la synthèse vocale (optionnel)
+- **Piper** pour la synthèse vocale (inclus)
+- **Whisper.cpp** pour la reconnaissance vocale (inclus)
 - **GPU recommandé** (testé avec RTX 3060 12GB, mais CPU possible)
 
 ### Étapes
@@ -71,10 +76,11 @@ Assistant personnel local alimenté par IA avec capacités vocales et mémoire l
    # Éditer .env avec vos paramètres
    ```
 
-4. **Installer Piper (optionnel pour TTS)**
+4. **Piper et Whisper (déjà inclus)**
    ```bash
-   # Déjà inclus dans le projet
-   # Télécharger une voix française si nécessaire
+   # Piper TTS : ./piper/piper
+   # Whisper STT : ./whisper-cpp/build/bin/whisper-cli
+   # Modèle Whisper : téléchargé automatiquement au premier usage
    ```
 
 5. **Lancer Ollama**
@@ -145,6 +151,8 @@ assistant-personnel/
 │   │   ├── memory-detector.ts    # Détection intentions de mémorisation
 │   │   ├── tools.ts              # Système d'outils (calcul, dates, etc.)
 │   │   ├── voice.ts              # Synthèse vocale avec Piper
+│   │   ├── speech.ts             # Reconnaissance vocale avec Whisper
+│   │   ├── semantic-extractor.ts # Extraction de triplets S-R-O
 │   │   └── system-monitor.ts     # Monitoring système (CPU, RAM, GPU)
 │   └── server.ts                 # Serveur Express + API REST
 ├── public/
@@ -161,8 +169,9 @@ assistant-personnel/
 - **Backend** : Node.js + Express + TypeScript
 - **LLM** : Ollama (API compatible OpenAI)
 - **TTS** : Piper (synthèse vocale locale haute qualité)
+- **STT** : Whisper.cpp (reconnaissance vocale locale)
 - **Frontend** : HTML/CSS/JS vanilla avec Markdown-it
-- **Mémoire** : JSON (fichier plat, extensible vers SQLite)
+- **Mémoire** : JSON (format SPO - Sujet-Prédicat-Objet)
 - **Monitoring** : systeminformation (Node.js)
 
 ---
@@ -215,9 +224,30 @@ Utilisateur : Convertis 100 km en miles
 Lizzi : 100 km = 62.14 miles
 ```
 
-### Synthèse Vocale
+### Synthèse Vocale (TTS)
 
 Cliquer sur l'icône 🔊 à côté d'une réponse pour l'écouter.
+
+### Reconnaissance Vocale (STT)
+
+**Mode Push-to-Talk (par défaut)** :
+```
+1. Maintenir ESPACE enfoncé
+2. Parler clairement
+3. Relâcher ESPACE
+4. Attendre la transcription (2-5 secondes)
+5. Le texte apparaît dans le champ de saisie
+```
+
+**Mode bouton micro** :
+```
+1. Cliquer sur 🎤
+2. Parler
+3. Cliquer sur ⏹️ pour arrêter
+4. Transcription automatique
+```
+
+**Astuce** : Le push-to-talk fonctionne immédiatement au chargement de la page. Pour saisir du texte manuellement, cliquez d'abord dans le champ.
 
 ---
 
@@ -347,24 +377,7 @@ DELETE /api/facts/:id
 
 ## ⚠️ Problèmes Connus & Solutions
 
-### 1. ✅ Erreurs TypeScript au Build (CORRIGÉ)
-
-**Symptômes** :
-```
-error TS2339: Property 'save' does not exist on type 'LongTermMemory'
-error TS2339: Property 'key' does not exist on type 'MemoryResult'
-```
-
-**Cause** : Incompatibilité entre interfaces et appels de méthodes
-
-**Solution appliquée** :
-- Remplacé `save()` par `add()` avec les bons paramètres
-- Utilisé `predicate/object/subject` au lieu de `key/value`
-- Ajouté le 4ème paramètre à `updateFact()`
-
-✅ **Le build passe maintenant sans erreur**
-
-### 2. 🔧 Doublons en Mémoire Long Terme
+### 1. 🔧 Doublons en Mémoire Long Terme
 
 **Symptômes** :
 ```json
@@ -386,7 +399,7 @@ Supprimer manuellement les doublons via l'API :
 curl -X DELETE http://localhost:3001/api/facts/fact_123
 ```
 
-### 3. 🔧 Prénom Non Géré
+### 2. 🔧 Prénom Non Géré
 
 **Symptômes** : Tous les faits sont pour "Utilisateur" au lieu de "Patrick"
 
@@ -399,7 +412,7 @@ curl -X DELETE http://localhost:3001/api/facts/fact_123
 **Workaround temporaire** :
 Dire explicitement : "Je m'appelle Patrick" pour créer le fait identité
 
-### 4. 🔧 Mémoire Contextuelle Limitée
+### 3. 🔧 Mémoire Contextuelle Limitée
 
 **Symptômes** : Lizzi oublie le contexte après 20 messages
 
@@ -415,11 +428,15 @@ constructor(maxMessages: number = 50) {  // Augmenter à 50
 
 ## 🚀 Évolutions Planifiées
 
-### Phase 1 - Fixes Critiques (1-2 jours)
+### Phase 1 - Fonctionnalités Principales (✅ TERMINÉE)
 
 - [x] ✅ Corriger les erreurs TypeScript
-- [ ] 🔧 Implémenter le système multi-valeurs pour les prédicats
-- [ ] 🔧 Corriger l'affichage des souvenirs (predicate/object)
+- [x] ✅ Reconnaissance vocale Whisper.cpp
+- [x] ✅ Mode Push-to-Talk (ESPACE)
+- [x] ✅ Éditeur de faits (interface CRUD)
+- [x] ✅ Extraction sémantique Sujet-Relation-Objet
+- [x] ✅ Bouton copier sur les blocs de code
+- [x] ✅ TTS ignore le code markdown
 
 ### Phase 2 - Améliorations (1 semaine)
 
@@ -603,4 +620,5 @@ Pour toute question :
 - 🐛 Ouvrir une issue GitHub
 - 💬 Discussions dans l'onglet Discussions
 
-**Dernière mise à jour** : 15 janvier 2026
+**Dernière mise à jour** : 19 janvier 2026  
+**Version** : 1.0.0

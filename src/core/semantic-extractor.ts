@@ -17,135 +17,86 @@ export class SemanticExtractor {
   }
 
   /**
-   * Extrait un triplet sémantique (sujet, prédicat, objet) d'une phrase
-   * en utilisant le LLM pour une analyse intelligente
+   * Extrait un triplet sémantique épuré (Sujet, Prédicat, Objet)
    */
   async extractTriple(text: string, userName?: string): Promise<SemanticTriple | null> {
-    const prompt = `Tu es un analyseur sémantique expert. Extrait les informations factuelles sous forme de triplet (sujet, relation, objet).
+    const prompt = `Tu es un analyseur sémantique expert. Ton rôle est d'extraire des faits atomiques.
 
-Phrase à analyser : "${text}"
+Phrase : "${text}"
 
-RÈGLES D'EXTRACTION :
-1. IGNORE les mots d'instruction comme "mémorise", "retiens", "souviens-toi", etc.
-   - Ces mots indiquent qu'il faut mémoriser, mais ne font PAS partie du fait lui-même
+RÈGLES STRICTES :
+1. IGNORE les instructions ("mémorise", "note que", etc.).
+2. SUJET :
+   - Si l'utilisateur parle de lui ("je", "mon", "moi"), utilise "${userName || 'Utilisateur'}".
+   - Sinon, identifie l'entité réelle (ex: "Le soleil", "La tour Eiffel", "Pixel").
+3. PRÉDICAT : Utilise un verbe simple au présent (ex: "est", "aime", "possède", "habite", "travaille").
+4. OBJET : L'état, la possession ou le complément direct.
 
-2. Sujet : L'entité qui fait l'action
-   - Si "je/j'" dans la phrase, le sujet est "${userName || 'Utilisateur'}"
-   - Si "mon chat/chien/animal X", et que X fait l'action, le sujet est le NOM de l'animal (ex: "Pixel", "Belphégor")
-   - Si "ma voiture" est possédée, le sujet est "${userName || 'Utilisateur'}"
-   - IMPORTANT: identifie le VRAI acteur (qui fait l'action), pas le propriétaire
-   
-3. Prédicat (relation) : Le verbe ou l'action À LA 3ÈME PERSONNE
-   - "j'aime" → "aime" (PAS "j'aime")
-   - "je possède" → "possède" (PAS "je possède")
-   - "j'ai un chat" → "a un chat" (PAS "j'ai")
-   - Utilise l'infinitif ou forme nominale
-   - N'inclus JAMAIS "je/j'/mon/ma"
-   
-4. Objet : Ce qui est affecté par l'action
-   - Garde les détails importants
-   - Conserve les noms propres (Tesla, Paris, etc.)
+EXEMPLES :
+- "Note que le soleil est au maximum de son cycle" -> {"subject":"Le soleil","predicate":"est","object":"au maximum de son cycle"}
+- "Mémorise que j'aime les spaghettis" -> {"subject":"${userName || 'Utilisateur'}","predicate":"aime","object":"les spaghettis"}
+- "Retiens que mon chat s'appelle Belphégor" -> {"subject":"${userName || 'Utilisateur'}","predicate":"a un chat nommé","object":"Belphégor"}
+- "Pixel est un chien très joueur" -> {"subject":"Pixel","predicate":"est","object":"un chien très joueur"}
 
-EXEMPLES CORRECTS :
-- "mémorise que je possède un véhicule Tesla" → {"subject":"${userName || 'Utilisateur'}","predicate":"possède","object":"véhicule Tesla"}
-- "retiens que mon chat s'appelle Belphégor" → {"subject":"${userName || 'Utilisateur'}","predicate":"a un chat nommé","object":"Belphégor"}
-- "Pixel aime chasser les chats" → {"subject":"Pixel","predicate":"aime","object":"chasser les chats"}
-- "Belphégor déteste l'eau" → {"subject":"Belphégor","predicate":"déteste","object":"l'eau"}
-- "souviens-toi que j'habite à Paris" → {"subject":"${userName || 'Utilisateur'}","predicate":"habite à","object":"Paris"}
-- "n'oublie pas que je déteste les épinards" → {"subject":"${userName || 'Utilisateur'}","predicate":"déteste","object":"les épinards"}
-- "j'aime les spaghettis" → {"subject":"${userName || 'Utilisateur'}","predicate":"aime","object":"les spaghettis"}
-- "je travaille chez Google" → {"subject":"${userName || 'Utilisateur'}","predicate":"travaille chez","object":"Google"}
-- "ma couleur préférée est le bleu" → {"subject":"${userName || 'Utilisateur'}","predicate":"a comme couleur préférée","object":"bleu"}
-
-IMPORTANT :
-- Réponds UNIQUEMENT avec le JSON (pas de texte avant/après)
-- Si la phrase ne contient PAS de fait à mémoriser, réponds : null
-- Ne réponds pas si c'est une question ou une instruction sans fait
-
-Réponds maintenant :`;
+RÉPONDRE UNIQUEMENT EN JSON :
+{ "subject": "...", "predicate": "...", "object": "..." }
+Si aucun fait n'est présent, réponds : null`;
 
     try {
       const response = await this.ollama.chat({
         model: this.model,
         messages: [{ role: 'user', content: prompt }],
         stream: false,
-        options: {
-          temperature: 0.1, // Très bas pour extraction précise
-          top_p: 0.9
-        }
+        options: { temperature: 0.1 }
       });
 
       const content = response.message.content.trim();
-      
-      console.log('🧠 Extraction LLM:', content.substring(0, 150));
+      if (content.toLowerCase() === 'null') return null;
 
-      // Essayer de parser directement
-      if (content === 'null' || content.toLowerCase().includes('pas de fait')) {
-        return null;
-      }
-
-      // Extraire le JSON s'il est entouré de texte
       const jsonMatch = content.match(/\{[\s\S]*?\}/);
-      if (!jsonMatch) {
-        console.log('⚠️ Pas de JSON trouvé dans la réponse');
-        return null;
-      }
+      if (!jsonMatch) return null;
 
-      const triple = JSON.parse(jsonMatch[0]);
-      
-      // Validation
-      if (!triple.subject || !triple.predicate || !triple.object) {
-        console.log('⚠️ Triplet incomplet:', triple);
-        return null;
-      }
+      const triple: SemanticTriple = JSON.parse(jsonMatch[0]);
+
+      // Nettoyage final pour s'assurer que le prédicat reste simple
+      triple.predicate = this.normalizePredicate(triple.predicate);
 
       console.log('✅ Triplet extrait:', triple);
       return triple;
-
     } catch (error) {
-      console.error('❌ Erreur extraction sémantique:', error);
+      console.error('❌ Erreur extraction:', error);
       return null;
     }
   }
 
   /**
-   * Extrait plusieurs triplets d'un texte complexe
+   * Normalise le verbe pour éviter les phrases complexes dans le prédicat
+   */
+  private normalizePredicate(predicate: string): string {
+    return predicate
+      .toLowerCase()
+      .replace(/^(je|j'|tu|il|elle|on)\s+/, '') // Enlever les pronoms
+      .trim();
+  }
+
+  /**
+   * Extraction multiple pour les phrases complexes
    */
   async extractMultiple(text: string, userName?: string): Promise<SemanticTriple[]> {
-    const prompt = `Extrait TOUS les faits mémorisables de ce texte sous forme de triplets JSON.
-
-Texte : "${text}"
-
-Réponds avec un tableau JSON de triplets :
-[
-  {"subject":"...","predicate":"...","object":"..."},
-  {"subject":"...","predicate":"...","object":"..."}
-]
-
-Ou un tableau vide [] s'il n'y a pas de faits.`;
+    const prompt = `Extrait TOUS les faits du texte suivant sous forme de tableau JSON de triplets.
+    Texte : "${text}"
+    Format : [{"subject":"...","predicate":"...","object":"..."}]`;
 
     try {
       const response = await this.ollama.chat({
         model: this.model,
         messages: [{ role: 'user', content: prompt }],
-        stream: false,
-        options: {
-          temperature: 0.1
-        }
+        options: { temperature: 0.1 }
       });
 
-      const content = response.message.content.trim();
-      const jsonMatch = content.match(/\[[\s\S]*?\]/);
-      
-      if (!jsonMatch) {
-        return [];
-      }
-
-      const triples = JSON.parse(jsonMatch[0]);
-      return Array.isArray(triples) ? triples : [];
-
-    } catch (error) {
-      console.error('❌ Erreur extraction multiple:', error);
+      const jsonMatch = response.message.content.match(/\[[\s\S]*?\]/);
+      return jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    } catch {
       return [];
     }
   }
