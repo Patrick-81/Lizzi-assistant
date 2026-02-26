@@ -438,12 +438,12 @@ constructor(maxMessages: number = 50) {  // Augmenter à 50
 - [x] ✅ Bouton copier sur les blocs de code
 - [x] ✅ TTS ignore le code markdown
 
-### Phase 2 - Améliorations (1 semaine)
+### Phase 2 - Améliorations (✅ TERMINÉE)
 
-- [ ] 🔧 Ajouter la détection et demande du prénom utilisateur
-- [ ] 🔧 Implémenter la fusion automatique des faits similaires
-- [ ] 🔧 Améliorer la recherche sémantique avec scoring
-- [ ] 🔧 Ajouter des tests unitaires
+- [x] ✅ Ajouter la détection et demande du prénom utilisateur
+- [x] ✅ Améliorer la recherche sémantique avec scoring
+- [x] ✅ Implémenter la fusion automatique des faits similaires
+- [x] ✅ Ajouter des tests unitaires (20 tests vitest)
 
 ### Phase 3 - Évolutions (2 semaines)
 
