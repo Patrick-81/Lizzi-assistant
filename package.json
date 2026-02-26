@@ -8,7 +8,8 @@
     "dev": "tsx src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "migrate": "tsx scripts/migrate-memories.ts"
+    "migrate": "tsx scripts/migrate-memories.ts",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "",
@@ -17,7 +18,6 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "ollama": "^0.5.0",
     "similarity": "^1.2.1"
   },
   "devDependencies": {
@@ -27,6 +27,7 @@
     "@types/node": "^20.10.0",
     "@types/similarity": "^1.2.3",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
   }
 }

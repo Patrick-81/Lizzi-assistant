@@ -1,6 +1,6 @@
 // src/core/assistant.ts - VERSION CORRIGÉE COMPLÈTE
 import 'dotenv/config';
-import { Ollama } from 'ollama';
+import { LlamaCppClient } from './llm-client.js';
 import { SYSTEM_PROMPT } from './personality.js';
 import { ConversationMemory } from './memory.js';
 import { LongTermMemory, Fact } from './long-term-memory.js';
@@ -10,7 +10,8 @@ import { ToolSystem } from './tools.js';
 
 
 export class Assistant {
-  private ollama: Ollama;
+  private llm: LlamaCppClient;
+  private embeddingClient: LlamaCppClient;
   private memory: ConversationMemory;
   private static sharedLongTermMemory: LongTermMemory | null = null;
   private longTermMemory: LongTermMemory;
@@ -18,12 +19,25 @@ export class Assistant {
   private semanticExtractor: SemanticExtractor;
   private toolSystem: ToolSystem;
   private model: string;
+  private embeddingModel: string;
   private hasAskedName: boolean = false;
 
+  private readonly CTX_SIZE = parseInt(process.env.CTX_SIZE || '4096');
+  private readonly MAX_TOKENS = 1500;
+  // Estimation : ~4 caractères par token (approximation)
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
+  }
+
   constructor() {
-    const ollamaHost = process.env.OLLAMA_HOST || 'http://localhost:11434';
-    this.ollama = new Ollama({ host: ollamaHost });
-    this.model = process.env.MODEL_NAME || 'mistral';
+    const llmHost = process.env.LLM_HOST || 'http://localhost:11434';
+    const embeddingHost = process.env.EMBEDDING_HOST || llmHost;
+    
+    this.llm = new LlamaCppClient(llmHost);
+    this.embeddingClient = new LlamaCppClient(embeddingHost);
+    
+    this.model = process.env.MODEL_NAME || 'mistral-7b-instruct';
+    this.embeddingModel = process.env.EMBEDDING_MODEL || 'nomic-embed-text-v1.5';
     this.memory = new ConversationMemory();
 
     if (!Assistant.sharedLongTermMemory) {
@@ -32,12 +46,12 @@ export class Assistant {
     this.longTermMemory = Assistant.sharedLongTermMemory;
 
     this.memoryDetector = new MemoryDetector();
-    this.semanticExtractor = new SemanticExtractor(this.ollama, this.model);
+    this.semanticExtractor = new SemanticExtractor(this.llm, this.model);
     this.toolSystem = new ToolSystem();
   }
 
   async initialize() {
-    await this.longTermMemory.initialize(this.ollama);
+    await this.longTermMemory.initialize(this.embeddingClient, this.embeddingModel);
   }
 
   private async getUserName(): Promise<string | null> {
@@ -86,7 +100,7 @@ export class Assistant {
     return query;
   }
 
-  async chat(userMessage: string): Promise<string> {
+  async chat(userMessage: string): Promise<{ message: string; tokenInfo?: string }> {
     const startTime = Date.now();
     const userName = await this.getUserName();
 
@@ -95,7 +109,7 @@ export class Assistant {
       this.hasAskedName = true;
       const greeting = "Bonjour ! 😊 Avant que nous fassions plus ample connaissance, comment t'appelles-tu ?";
       this.memory.addMessage('assistant', greeting);
-      return greeting;
+      return { message: greeting };
     }
 
     // 2. Si l'utilisateur vient de donner son nom
@@ -103,9 +117,9 @@ export class Assistant {
       const triple = await this.semanticExtractor.extractTriple(userMessage);
       const extractedName = triple?.object || userMessage.trim();
 
-      await this.longTermMemory.add("s'appelle", extractedName, "Utilisateur", this.ollama);
+      await this.longTermMemory.add("s'appelle", extractedName, "Utilisateur", this.llm);
       this.hasAskedName = false;
-      return `Enchanté ${extractedName} ! Je prends note. Comment puis-je t'aider ?`;
+      return { message: `Enchanté ${extractedName} ! Je prends note. Comment puis-je t'aider ?` };
     }
 
     // 3. MÉMORISATION : Vérifie si l'utilisateur demande d'enregistrer quelque chose
@@ -123,7 +137,8 @@ export class Assistant {
       if (triple && triple.predicate !== 'inconnu') {
         // Recherche si un fait similaire existe déjà
         const queryForExisting = await this.longTermMemory.generateEmbedding(
-          this.ollama,
+          this.embeddingClient,
+          this.embeddingModel,
           `${triple.subject} ${triple.predicate}`
         );
         const existingFacts = await this.longTermMemory.vectorSearch(queryForExisting, 0.7);
@@ -134,12 +149,17 @@ export class Assistant {
 
         if (duplicate && !duplicate.objects.includes(triple.object)) {
           console.log(`🔄 Mise à jour: ${duplicate.predicate}`);
+          // Prédicats à valeur unique (on remplace), les autres sont multi-valeurs (on fusionne)
+          const singleValuePredicates = /^(s'appelle|nom|habite|vit à|travaille|est né|âge|est|mesure|pèse)/i;
+          const mergedObjects = singleValuePredicates.test(triple.predicate)
+            ? [triple.object]
+            : [...duplicate.objects, triple.object];
           await this.longTermMemory.update(
             duplicate.id,
             triple.predicate,
-            [triple.object],
+            mergedObjects,
             triple.subject,
-            this.ollama
+            this.llm
           );
         } else if (!duplicate) {
           console.log(`🆕 Nouveau souvenir: ${triple.subject} ${triple.predicate} ${triple.object}`);
@@ -147,14 +167,15 @@ export class Assistant {
             triple.predicate,
             triple.object,
             triple.subject,
-            this.ollama
+            this.embeddingClient,
+            this.embeddingModel
           );
         } else {
           console.log('⏭️ Fait déjà existant, pas de modification');
         }
 
         // Confirmation à l'utilisateur
-        return `C'est noté ! Je me souviendrai que ${triple.subject} ${triple.predicate} ${triple.object}.`;
+        return { message: `C'est noté ! Je me souviendrai que ${triple.subject} ${triple.predicate} ${triple.object}.` };
       } else {
         console.log('⚠️ Impossible d\'extraire un triplet valide');
       }
@@ -167,11 +188,11 @@ export class Assistant {
     const expandedQuery = this.expandQuery(userMessage);
     console.log('🔎 Requête élargie:', expandedQuery);
 
-    const queryVector = await this.longTermMemory.generateEmbedding(this.ollama, expandedQuery);
+    const queryVector = await this.longTermMemory.generateEmbedding(this.embeddingClient, this.embeddingModel, expandedQuery);
     console.log(`⏱️  Embedding généré en ${Date.now() - t1}ms`);
     
     const t2 = Date.now();
-    let relevantFacts = await this.longTermMemory.vectorSearch(queryVector, 0.35); // Seuil baissé à 0.35 pour meilleure couverture
+    let relevantFacts = await this.longTermMemory.vectorSearch(queryVector, 0.35);
     console.log(`⏱️  Recherche vectorielle en ${Date.now() - t2}ms`);
     
     const cacheStatus = this.longTermMemory.getCacheStatus();
@@ -270,19 +291,40 @@ export class Assistant {
 
     memoryContext += "\n═══════════════════════════════════════\n";
 
-    // 6. Préparation des messages pour Ollama
+    // 6. Préparation des messages pour LLM
     this.memory.addMessage('user', userMessage);
 
+    const toolDescriptions = this.toolSystem.getToolDescriptions();
+    const systemContent = SYSTEM_PROMPT + memoryContext + '\n\n' + toolDescriptions;
+    const allMessages = [
+      { role: 'system', content: systemContent },
+      ...this.memory.getMessages()
+    ];
+
+    // Estimation tokens du prompt
+    const promptTokens = allMessages.reduce((sum, m) => sum + this.estimateTokens(m.content), 0);
+    const available = this.CTX_SIZE - promptTokens;
+    console.log(`📊 Tokens estimés — prompt: ~${promptTokens}, disponibles pour réponse: ~${available}`);
+
+    if (available < 100) {
+      const warning = `⚠️ Le contexte est saturé (~${promptTokens} tokens utilisés sur ${this.CTX_SIZE}). Je ne peux pas répondre correctement. Essaie de vider l'historique ou de poser une question plus courte.`;
+      this.memory.addMessage('assistant', warning);
+      return { message: warning };
+    }
+
+    if (available < 400) {
+      console.warn(`⚠️ Peu de tokens disponibles pour la réponse (~${available})`);
+    }
+
+    const effectiveMaxTokens = Math.min(this.MAX_TOKENS, available - 50);
+
     const t3 = Date.now();
-    const response = await this.ollama.chat({
+    const response = await this.llm.chat({
       model: this.model,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT + memoryContext },
-        ...this.memory.getMessages()
-      ],
+      messages: allMessages,
       options: {
         temperature: 0.3,
-        num_predict: 150,  // Limite la réponse à 150 tokens max pour plus de rapidité
+        max_tokens: effectiveMaxTokens,
         stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant']
       }
     });
@@ -307,7 +349,7 @@ export class Assistant {
     const toolCall = this.detectToolCall(assistantMessage);
     if (toolCall && toolCall.tool) {
       const toolResult = await this.toolSystem.executeTool(toolCall.tool, toolCall.params);
-      const followUp = await this.ollama.chat({
+      const followUp = await this.llm.chat({
         model: this.model,
         messages: [
           ...this.memory.getMessages(),
@@ -325,8 +367,13 @@ export class Assistant {
     }
 
     this.memory.addMessage('assistant', assistantMessage);
+
+    // Statistiques tokens (retournées séparément, pas dans le texte vocal)
+    const responseTokens = this.estimateTokens(assistantMessage);
+    const tokenInfo = `~${promptTokens} tokens prompt · ~${responseTokens} tokens réponse · ${this.CTX_SIZE - promptTokens - responseTokens} restants`;
+
     console.log(`⏱️  TEMPS TOTAL: ${Date.now() - startTime}ms`);
-    return assistantMessage;
+    return { message: assistantMessage, tokenInfo };
   }
 
   // --- MÉTHODES API POUR SERVER.TS ---
@@ -340,17 +387,17 @@ export class Assistant {
   }
 
   async searchFacts(query: string): Promise<Fact[]> {
-    const queryVector = await this.longTermMemory.generateEmbedding(this.ollama, query);
+    const queryVector = await this.longTermMemory.generateEmbedding(this.embeddingClient, this.embeddingModel, query);
     return await this.longTermMemory.vectorSearch(queryVector);
   }
 
   async saveFact(predicate: string, object: string, subject: string = 'Utilisateur'): Promise<Fact> {
-    return await this.longTermMemory.add(predicate, object, subject, this.ollama);
+    return await this.longTermMemory.add(predicate, object, subject, this.embeddingClient, this.embeddingModel);
   }
 
   async updateFact(id: string, predicate: string, objects: string[] | string, subject?: string): Promise<Fact | null> {
     const objectsArray = Array.isArray(objects) ? objects : [objects];
-    return await this.longTermMemory.update(id, predicate, objectsArray, subject || 'Utilisateur', this.ollama);
+    return await this.longTermMemory.update(id, predicate, objectsArray, subject || 'Utilisateur', this.embeddingClient, this.embeddingModel);
   }
 
   async deleteFact(id: string): Promise<boolean> {
