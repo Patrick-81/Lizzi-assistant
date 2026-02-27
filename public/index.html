@@ -471,6 +471,14 @@
       display: block;
     }
 
+    .token-info {
+      font-size: 11px;
+      color: #888;
+      margin-top: 4px;
+      opacity: 0.7;
+      font-style: italic;
+    }
+
     .speaking-indicator {
       display: none;
       color: #34c759;
@@ -866,6 +874,133 @@
       border-top-color: #2a2a2a;
       color: #9ca3af;
     }
+
+    /* ── Calendrier ─────────────────────────────────── */
+    .calendar-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 16px 20px;
+      background: #fafafa;
+    }
+    body.dark-mode .calendar-container { background: #111; }
+
+    .calendar-nav {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-shrink: 0;
+    }
+    .calendar-nav h2 {
+      flex: 1;
+      text-align: center;
+      font-size: 17px;
+      font-weight: 600;
+      color: #1d1d1f;
+      text-transform: capitalize;
+    }
+    body.dark-mode .calendar-nav h2 { color: #e5e5e7; }
+    .cal-btn {
+      background: white;
+      border: 1px solid #e5e5e7;
+      border-radius: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 16px;
+      color: #1d1d1f;
+      transition: background 0.15s;
+    }
+    .cal-btn:hover { background: #f0f0f0; }
+    body.dark-mode .cal-btn { background: #2a2a2a; border-color: #3a3a3a; color: #e5e5e7; }
+    body.dark-mode .cal-btn:hover { background: #3a3a3a; }
+
+    .calendar-weekdays {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 2px;
+      margin-bottom: 2px;
+      flex-shrink: 0;
+    }
+    .calendar-weekdays div {
+      text-align: center;
+      font-size: 11px;
+      font-weight: 600;
+      color: #86868b;
+      padding: 4px 0;
+      text-transform: uppercase;
+    }
+
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 2px;
+      flex: 1;
+      overflow: auto;
+    }
+    .cal-day {
+      background: white;
+      border-radius: 6px;
+      padding: 5px 6px;
+      min-height: 72px;
+      position: relative;
+      overflow: hidden;
+      cursor: default;
+    }
+    body.dark-mode .cal-day { background: #1e1e1e; }
+    .cal-day.other-month { opacity: 0.35; }
+    .cal-day.today { outline: 2px solid #007aff; outline-offset: -2px; }
+    .cal-day-num {
+      font-size: 12px;
+      font-weight: 600;
+      color: #1d1d1f;
+      margin-bottom: 3px;
+      display: inline-block;
+    }
+    body.dark-mode .cal-day-num { color: #e5e5e7; }
+    .cal-day.today .cal-day-num {
+      background: #007aff;
+      color: white;
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+    }
+    .cal-event {
+      font-size: 10px;
+      background: #007aff;
+      color: white;
+      border-radius: 3px;
+      padding: 1px 4px;
+      margin-top: 2px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .cal-event:hover { opacity: 0.85; }
+    .cal-event.all-day { background: #34c759; }
+    .cal-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: #86868b;
+      font-size: 14px;
+    }
+    .cal-status {
+      text-align: center;
+      font-size: 12px;
+      color: #86868b;
+      margin-bottom: 10px;
+      flex-shrink: 0;
+    }
+    .cal-status a { color: #007aff; text-decoration: none; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -901,6 +1036,7 @@
     <div class="tabs">
       <div class="tab active" onclick="switchTab('chat')">Chat</div>
       <div class="tab" onclick="switchTab('memory')">Mémoire</div>
+      <div class="tab" onclick="switchTab('calendar')">📅 Agenda</div>
     </div>
 
     <!-- Onglet Chat -->
@@ -968,12 +1104,36 @@
         </div>
       </div>
     </div>
+
+    <!-- Onglet Agenda -->
+    <div class="content-area" id="calendarTab">
+      <div class="calendar-container">
+        <div id="calStatusBar" class="cal-status" style="display:none">
+          ⚠️ Agenda non disponible
+        </div>
+        <div class="calendar-nav">
+          <button class="cal-btn" onclick="prevMonth()">‹</button>
+          <h2 id="calendarTitle"></h2>
+          <button class="cal-btn" onclick="nextMonth()">›</button>
+          <button class="cal-btn" onclick="goToToday()">Aujourd'hui</button>
+        </div>
+        <div class="calendar-weekdays">
+          <div>Lun</div><div>Mar</div><div>Mer</div>
+          <div>Jeu</div><div>Ven</div><div>Sam</div><div>Dim</div>
+        </div>
+        <div class="calendar-grid" id="calendarGrid">
+          <div class="cal-loading">Chargement…</div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
     const API_URL = window.location.origin;
     const sessionId = 'session_' + Date.now();
     let voiceEnabled = true;
+    let calendarYear = null;
+    let calendarMonth = null;
     let currentAudio = null;
     let mediaRecorder = null;
     let audioChunks = [];
@@ -1040,7 +1200,7 @@
       }
     }
 
-    function addMessage(content, isUser) {
+    function addMessage(content, isUser, tokenInfo) {
       const chatContainer = document.getElementById('chatContainer');
       const messageDiv = document.createElement('div');
       messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
@@ -1086,6 +1246,15 @@
       }
 
       messageDiv.appendChild(contentDiv);
+
+      // Badge token info (uniquement pour les messages assistant, hors vocal)
+      if (!isUser && tokenInfo) {
+        const tokenDiv = document.createElement('div');
+        tokenDiv.className = 'token-info';
+        tokenDiv.textContent = '📊 ' + tokenInfo;
+        messageDiv.appendChild(tokenDiv);
+      }
+
       chatContainer.appendChild(messageDiv);
 
       chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -1118,10 +1287,17 @@
         if (data.error) {
           addMessage('Une erreur est survenue : ' + data.error, false);
         } else {
-          addMessage(data.response, false);
+          addMessage(data.response, false, data.tokenInfo);
 
           if (voiceEnabled) {
             speakText(data.response);
+          }
+
+          if (data.calendarAction) {
+            const { year, month } = data.calendarAction;
+            calendarYear = year;
+            calendarMonth = month;
+            switchTab('calendar');
           }
         }
       } catch (error) {
@@ -1382,6 +1558,116 @@
       }
     }
 
+    /* ── Calendrier ─────────────────────────────────── */
+    async function loadCalendar(year, month) {
+      calendarYear = year;
+      calendarMonth = month;
+      const grid = document.getElementById('calendarGrid');
+      grid.innerHTML = '<div class="cal-loading">Chargement…</div>';
+      updateCalendarTitle(year, month);
+      try {
+        const res = await fetch(`${API_URL}/api/calendar/events?year=${year}&month=${month}`);
+        const data = await res.json();
+        if (!data.connected) {
+          document.getElementById('calStatusBar').style.display = '';
+        } else {
+          document.getElementById('calStatusBar').style.display = 'none';
+        }
+        renderCalendar(year, month, data.events || []);
+      } catch (e) {
+        grid.innerHTML = '<div class="cal-loading">Erreur de chargement</div>';
+      }
+    }
+
+    function updateCalendarTitle(year, month) {
+      const title = new Date(year, month - 1, 1)
+        .toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+      document.getElementById('calendarTitle').textContent = title;
+    }
+
+    function renderCalendar(year, month, events) {
+      const grid = document.getElementById('calendarGrid');
+      grid.innerHTML = '';
+
+      // Normalise les événements Google Calendar vers {title, start, allDay}
+      const normalized = events.map(ev => ({
+        title: ev.summary || ev.title || '(sans titre)',
+        start: ev.start?.dateTime || ev.start?.date || ev.start || null,
+        allDay: !ev.start?.dateTime
+      }));
+
+      // Map events by day
+      const byDay = {};
+      normalized.forEach(ev => {
+        const d = ev.start ? ev.start.split('T')[0] : null;
+        if (!d) return;
+        if (!byDay[d]) byDay[d] = [];
+        byDay[d].push(ev);
+      });
+
+      const today = new Date();
+      const firstDay = new Date(year, month - 1, 1);
+      // Monday = 0 offset (getDay returns 0=Sun,1=Mon,...6=Sat)
+      let startOffset = (firstDay.getDay() + 6) % 7;
+      const daysInMonth = new Date(year, month, 0).getDate();
+
+      // Previous month days
+      const prevMonthDays = new Date(year, month - 1, 0).getDate();
+      for (let i = startOffset - 1; i >= 0; i--) {
+        const d = prevMonthDays - i;
+        const cell = document.createElement('div');
+        cell.className = 'cal-day other-month';
+        cell.innerHTML = `<span class="cal-day-num">${d}</span>`;
+        grid.appendChild(cell);
+      }
+
+      // Current month days
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+        const isToday = today.getFullYear() === year && today.getMonth() + 1 === month && today.getDate() === d;
+        const cell = document.createElement('div');
+        cell.className = 'cal-day' + (isToday ? ' today' : '');
+        cell.innerHTML = `<span class="cal-day-num">${d}</span>`;
+        const dayEvs = byDay[dateStr] || [];
+        dayEvs.forEach(ev => {
+          const el = document.createElement('div');
+          el.className = 'cal-event' + (ev.allDay ? ' all-day' : '');
+          const time = ev.allDay ? '' : (ev.start ? ev.start.slice(11,16) + ' ' : '');
+          el.textContent = time + (ev.title || '(sans titre)');
+          el.title = ev.title || '';
+          cell.appendChild(el);
+        });
+        grid.appendChild(cell);
+      }
+
+      // Next month padding
+      const totalCells = startOffset + daysInMonth;
+      const remaining = totalCells % 7 === 0 ? 0 : 7 - (totalCells % 7);
+      for (let d = 1; d <= remaining; d++) {
+        const cell = document.createElement('div');
+        cell.className = 'cal-day other-month';
+        cell.innerHTML = `<span class="cal-day-num">${d}</span>`;
+        grid.appendChild(cell);
+      }
+    }
+
+    function prevMonth() {
+      calendarMonth--;
+      if (calendarMonth < 1) { calendarMonth = 12; calendarYear--; }
+      loadCalendar(calendarYear, calendarMonth);
+    }
+    function nextMonth() {
+      calendarMonth++;
+      if (calendarMonth > 12) { calendarMonth = 1; calendarYear++; }
+      loadCalendar(calendarYear, calendarMonth);
+    }
+    function goToToday() {
+      const now = new Date();
+      calendarYear = now.getFullYear();
+      calendarMonth = now.getMonth() + 1;
+      loadCalendar(calendarYear, calendarMonth);
+    }
+
     function switchTab(tab) {
       // Gestion des onglets
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1396,6 +1682,15 @@
         document.querySelectorAll('.tab')[1].classList.add('active');
         document.getElementById('memoryTab').classList.add('active');
         loadFacts();
+      } else if (tab === 'calendar') {
+        document.querySelectorAll('.tab')[2].classList.add('active');
+        document.getElementById('calendarTab').classList.add('active');
+        if (!calendarYear) {
+          const now = new Date();
+          calendarYear = now.getFullYear();
+          calendarMonth = now.getMonth() + 1;
+        }
+        loadCalendar(calendarYear, calendarMonth);
       }
     }
 

@@ -32,6 +32,27 @@ export class MemoryDetector {
 
     const normalizedText = text.toLowerCase().trim();
 
+    // 0. Exclusion prioritaire : si le message mentionne l'agenda ou contient
+    //    une date/heure précise, c'est un événement calendrier → ne pas mémoriser
+    const calendarPatterns = [
+      /\bagenda\b/i,
+      /\bcalendrier\b/i,
+      /\brendez-vous\b|\brdv\b/i,
+      /\breunion\b|\bréunion\b/i,
+      // Date au format JJ/MM/AAAA ou AAAA-MM-JJ
+      /\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/,
+      // Heure au format HH:HH ou "à 14h"
+      /\bà \d{1,2}h\d{0,2}\b/i,
+      /\b\d{1,2}:\d{2}\b/,
+      // Mots temporels précis
+      /\bdemain\b.*\b\d{1,2}h\b/i,
+      /\blundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche\b.*\b\d{1,2}h\b/i
+    ];
+
+    if (calendarPatterns.some(p => p.test(normalizedText))) {
+      return false;
+    }
+
     // 1. Vérification des mots-clés d'action (ex: "Note que...")
     const hasActionWord = MemoryDetector.ACTION_KEYWORDS.some(keyword =>
       normalizedText.includes(keyword)

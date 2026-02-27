@@ -1,5 +1,5 @@
 // src/core/semantic-extractor.ts
-import { Ollama } from 'ollama';
+import { LlamaCppClient } from './llm-client.js';
 
 export interface SemanticTriple {
   subject: string;
@@ -8,11 +8,11 @@ export interface SemanticTriple {
 }
 
 export class SemanticExtractor {
-  private ollama: Ollama;
+  private llm: LlamaCppClient;
   private model: string;
 
-  constructor(ollama: Ollama, model: string) {
-    this.ollama = ollama;
+  constructor(llm: LlamaCppClient, model: string) {
+    this.llm = llm;
     this.model = model;
   }
 
@@ -43,10 +43,9 @@ RÉPONDRE UNIQUEMENT EN JSON :
 Si aucun fait n'est présent, réponds : null`;
 
     try {
-      const response = await this.ollama.chat({
+      const response = await this.llm.chat({
         model: this.model,
         messages: [{ role: 'user', content: prompt }],
-        stream: false,
         options: { temperature: 0.1 }
       });
 
@@ -88,7 +87,7 @@ Si aucun fait n'est présent, réponds : null`;
     Format : [{"subject":"...","predicate":"...","object":"..."}]`;
 
     try {
-      const response = await this.ollama.chat({
+      const response = await this.llm.chat({
         model: this.model,
         messages: [{ role: 'user', content: prompt }],
         options: { temperature: 0.1 }
