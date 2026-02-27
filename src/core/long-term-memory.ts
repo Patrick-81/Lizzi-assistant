@@ -1,6 +1,7 @@
-// src/core/long-term-memory.ts - VERSION CORRIGÉE COMPLÈTE
+// src/core/long-term-memory.ts
 import { promises as fs } from 'fs';
 import path from 'path';
+import type { LlamaCppClient } from './llm-client.js';
 
 export interface Fact {
   id: string;
@@ -22,15 +23,17 @@ export class LongTermMemory {
   private memoryPath: string;
   private facts: Map<string, Fact> = new Map();
   private vectorCache: Map<string, number[]> = new Map();
-  private ollama: any = null;
+  private embeddingClient: LlamaCppClient | null = null;
+  private embeddingModel: string | undefined = undefined;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.memoryPath = path.join(process.cwd(), 'data', 'memories.json');
   }
 
-  async initialize(ollama: any, model?: string) {
-    this.ollama = ollama;  // Sauvegarde l'instance pour usage ultérieur
+  async initialize(client: LlamaCppClient, model?: string) {
+    this.embeddingClient = client;
+    this.embeddingModel = model;
 
     try {
       const data = await fs.readFile(this.memoryPath, 'utf-8');
@@ -46,7 +49,7 @@ export class LongTermMemory {
       console.log(`⏳ Vectorisation de ${factsArray.length} faits en cours (batch de ${EMBEDDING_BATCH_SIZE})...`);
       for (let i = 0; i < factsArray.length; i += EMBEDDING_BATCH_SIZE) {
         const batch = factsArray.slice(i, i + EMBEDDING_BATCH_SIZE);
-        const vectors = await Promise.all(batch.map(fact => this.generateEmbedding(ollama, model, fact)));
+        const vectors = await Promise.all(batch.map(fact => this.generateEmbedding(fact)));
         batch.forEach((fact, idx) => this.vectorCache.set(fact.id, vectors[idx]));
       }
       console.log(`✅ Mémoire prête : ${this.facts.size} faits, ${this.vectorCache.size} vecteurs.`);
@@ -57,21 +60,24 @@ export class LongTermMemory {
     }
   }
 
-  async generateEmbedding(ollama: any, model: string | undefined, input: Fact | string): Promise<number[]> {
+  async generateEmbedding(input: Fact | string): Promise<number[]> {
     const text = typeof input === 'string'
       ? input
       : `${input.subject} ${input.predicate} ${input.objects.join(', ')}`;
 
+    if (!this.embeddingClient) {
+      return new Array(384).fill(0);
+    }
+
     try {
-      const response = await ollama.embeddings({
-        model,
+      const response = await this.embeddingClient.embeddings({
+        model: this.embeddingModel,
         prompt: text
       });
       return response.embedding;
     } catch (error) {
       console.error('❌ Erreur génération embedding:', error);
-      // Retourne un vecteur vide en cas d'erreur pour ne pas bloquer
-      return new Array(384).fill(0); // Dimension par défaut
+      return new Array(384).fill(0);
     }
   }
 
@@ -87,12 +93,12 @@ export class LongTermMemory {
     }
 
     // Si des vecteurs manquent, les régénérer AVANT la recherche
-    if (missingVectors.length > 0 && this.ollama) {
+    if (missingVectors.length > 0 && this.embeddingClient) {
       console.log(`⚠️  ${missingVectors.length} vecteur(s) manquant(s), régénération...`);
       for (const factId of missingVectors) {
         const fact = this.facts.get(factId);
         if (fact) {
-          const vector = await this.generateEmbedding(this.ollama, undefined, fact);
+          const vector = await this.generateEmbedding(fact);
           this.vectorCache.set(factId, vector);
           console.log(`✅ Vecteur régénéré pour ${factId}`);
         }
@@ -140,7 +146,7 @@ export class LongTermMemory {
     }, 500);
   }
 
-  async add(predicate: string, object: string, subject: string, ollama: any, model?: string): Promise<Fact> {
+  async add(predicate: string, object: string, subject: string): Promise<Fact> {
     const id = `fact_${Date.now()}`;
     const newFact: Fact = {
       id,
@@ -152,11 +158,9 @@ export class LongTermMemory {
       updatedAt: new Date().toISOString()
     };
 
-    // Mise à jour de la Map des faits
     this.facts.set(id, newFact);
 
-    // IMPORTANT: Générer ET sauvegarder le vecteur immédiatement
-    const vector = await this.generateEmbedding(ollama, model, newFact);
+    const vector = await this.generateEmbedding(newFact);
     this.vectorCache.set(id, vector);
 
     console.log(`✅ Fait ajouté: ${subject} ${predicate} ${object} (vecteur: ${vector.length}D)`);
@@ -165,7 +169,7 @@ export class LongTermMemory {
     return newFact;
   }
 
-  async update(id: string, predicate: string, objects: string[], subject: string, ollama: any, model?: string): Promise<Fact | null> {
+  async update(id: string, predicate: string, objects: string[], subject: string): Promise<Fact | null> {
     const fact = this.facts.get(id);
     if (!fact) {
       console.log(`❌ Fait ${id} introuvable pour mise à jour`);
@@ -177,8 +181,7 @@ export class LongTermMemory {
     fact.subject = subject;
     fact.updatedAt = new Date().toISOString();
 
-    // IMPORTANT: Recalculer le vecteur car le contenu a changé
-    const vector = await this.generateEmbedding(ollama, model, fact);
+    const vector = await this.generateEmbedding(fact);
     this.vectorCache.set(id, vector);
 
     console.log(`✅ Fait mis à jour: ${subject} ${predicate} ${objects.join(', ')}`);

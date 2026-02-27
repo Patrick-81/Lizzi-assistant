@@ -7,7 +7,7 @@ import { LongTermMemory, Fact } from './long-term-memory.js';
 import { MemoryDetector } from './memory-detector.js';
 import { SemanticExtractor } from './semantic-extractor.js';
 import { ToolSystem } from './tools.js';
-import { LocalCalendarClient } from './local-calendar.js';
+import { LocalCalendarClient, LocalEvent } from './local-calendar.js';
 
 
 export class Assistant {
@@ -23,7 +23,7 @@ export class Assistant {
   private model: string;
   private embeddingModel: string;
   private hasAskedName: boolean = false;
-  private pendingDeletion: { event: any } | null = null;
+  private pendingDeletion: { event: LocalEvent } | null = null;
 
   private readonly CTX_SIZE = parseInt(process.env.CTX_SIZE || '4096');
   private readonly MAX_TOKENS = 1500;
@@ -229,7 +229,7 @@ export class Assistant {
 
     if (candidates.length === 1) {
       const ev = candidates[0];
-      const d = new Date(ev.start.dateTime || ev.start.date);
+      const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
       const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
       const timeStr = ev.start.dateTime
         ? ` à ${d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`
@@ -240,7 +240,7 @@ export class Assistant {
 
     // Plusieurs candidats → lister
     const list = candidates.slice(0, 5).map((ev: any, i: number) => {
-      const d = new Date(ev.start.dateTime || ev.start.date);
+      const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
       const dateStr = d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
       return `${i + 1}. ${ev.summary} — ${dateStr}`;
     }).join('\n');
@@ -291,7 +291,7 @@ export class Assistant {
       const triple = await this.semanticExtractor.extractTriple(userMessage);
       const extractedName = triple?.object || userMessage.trim();
 
-      await this.longTermMemory.add("s'appelle", extractedName, "Utilisateur", this.llm);
+      await this.longTermMemory.add("s'appelle", extractedName, "Utilisateur");
       this.hasAskedName = false;
       return { message: `Enchanté ${extractedName} ! Je prends note. Comment puis-je t'aider ?` };
     }
@@ -308,7 +308,7 @@ export class Assistant {
       if (isYes) {
         try {
           await this.localCalendar.deleteEvent(ev.id);
-          const d = new Date(ev.start.dateTime || ev.start.date);
+          const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
           const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
           const msg = `✅ "${ev.summary}" du ${dateStr} supprimé.`;
           this.memory.addMessage('user', userMessage);
@@ -330,7 +330,7 @@ export class Assistant {
       }
 
       // Réponse ambiguë → on repose la question
-      const d = new Date(ev.start.dateTime || ev.start.date);
+      const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
       const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
       this.pendingDeletion = { event: ev }; // remet en attente
       const msg = `Je n'ai pas compris. Tu veux supprimer "${ev.summary}" du ${dateStr} ? (oui / non)`;
@@ -354,8 +354,6 @@ export class Assistant {
       if (triple && triple.predicate !== 'inconnu') {
         // Recherche si un fait similaire existe déjà
         const queryForExisting = await this.longTermMemory.generateEmbedding(
-          this.embeddingClient,
-          this.embeddingModel,
           `${triple.subject} ${triple.predicate}`
         );
         const existingFacts = await this.longTermMemory.vectorSearch(queryForExisting, 0.7);
@@ -375,17 +373,14 @@ export class Assistant {
             duplicate.id,
             triple.predicate,
             mergedObjects,
-            triple.subject,
-            this.llm
+            triple.subject
           );
         } else if (!duplicate) {
           console.log(`🆕 Nouveau souvenir: ${triple.subject} ${triple.predicate} ${triple.object}`);
           await this.longTermMemory.add(
             triple.predicate,
             triple.object,
-            triple.subject,
-            this.embeddingClient,
-            this.embeddingModel
+            triple.subject
           );
         } else {
           console.log('⏭️ Fait déjà existant, pas de modification');
@@ -464,7 +459,7 @@ export class Assistant {
     const expandedQuery = this.expandQuery(userMessage);
     console.log('🔎 Requête élargie:', expandedQuery);
 
-    const queryVector = await this.longTermMemory.generateEmbedding(this.embeddingClient, this.embeddingModel, expandedQuery);
+    const queryVector = await this.longTermMemory.generateEmbedding(expandedQuery);
     console.log(`⏱️  Embedding généré en ${Date.now() - t1}ms`);
     
     const t2 = Date.now();
@@ -679,17 +674,17 @@ export class Assistant {
   }
 
   async searchFacts(query: string): Promise<Fact[]> {
-    const queryVector = await this.longTermMemory.generateEmbedding(this.embeddingClient, this.embeddingModel, query);
+    const queryVector = await this.longTermMemory.generateEmbedding(query);
     return await this.longTermMemory.vectorSearch(queryVector);
   }
 
   async saveFact(predicate: string, object: string, subject: string = 'Utilisateur'): Promise<Fact> {
-    return await this.longTermMemory.add(predicate, object, subject, this.embeddingClient, this.embeddingModel);
+    return await this.longTermMemory.add(predicate, object, subject);
   }
 
   async updateFact(id: string, predicate: string, objects: string[] | string, subject?: string): Promise<Fact | null> {
     const objectsArray = Array.isArray(objects) ? objects : [objects];
-    return await this.longTermMemory.update(id, predicate, objectsArray, subject || 'Utilisateur', this.embeddingClient, this.embeddingModel);
+    return await this.longTermMemory.update(id, predicate, objectsArray, subject || 'Utilisateur');
   }
 
   async deleteFact(id: string): Promise<boolean> {
