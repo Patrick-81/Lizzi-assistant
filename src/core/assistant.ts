@@ -71,9 +71,9 @@ export class Assistant {
 
   private async getUserName(): Promise<string | null> {
     const facts = await this.longTermMemory.getAll();
+    // Cherche un fait "s'appelle" ou "nom" quel que soit le sujet
     const nameFact = facts.find(
-      f => (f.subject.toLowerCase() === 'utilisateur') &&
-           (f.predicate === 's\'appelle' || f.predicate === 'nom')
+      f => f.predicate === 's\'appelle' || f.predicate === 'nom'
     );
     return nameFact?.objects[0] || null;
   }
