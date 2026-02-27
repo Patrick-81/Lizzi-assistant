@@ -9,6 +9,12 @@ import { SemanticExtractor } from './semantic-extractor.js';
 import { ToolSystem } from './tools.js';
 import { LocalCalendarClient, LocalEvent } from './local-calendar.js';
 
+export type StreamEvent =
+  | { type: 'thinking' }
+  | { type: 'token'; text: string }
+  | { type: 'done'; message: string; tokenInfo?: string; calendarAction?: { year: number; month: number } }
+  | { type: 'error'; message: string };
+
 
 export class Assistant {
   private llm: LlamaCppClient;
@@ -454,176 +460,23 @@ export class Assistant {
       }
     }
 
-    // 7. RECHERCHE SÉMANTIQUE avec requête élargie
-    const t1 = Date.now();
-    const expandedQuery = this.expandQuery(userMessage);
-    console.log('🔎 Requête élargie:', expandedQuery);
-
-    const queryVector = await this.longTermMemory.generateEmbedding(expandedQuery);
-    console.log(`⏱️  Embedding généré en ${Date.now() - t1}ms`);
-    
-    const t2 = Date.now();
-    let relevantFacts = await this.longTermMemory.vectorSearch(queryVector, 0.35);
-    console.log(`⏱️  Recherche vectorielle en ${Date.now() - t2}ms`);
-    
-    const cacheStatus = this.longTermMemory.getCacheStatus();
-    console.log(`📊 Cache: ${cacheStatus.cachedVectors}/${cacheStatus.totalFacts} vecteurs (${cacheStatus.missingVectors} manquants)`);
-
-    // Fallbacks : une seule récupération partagée
-    let allFactsCache: Fact[] | null = null;
-    const getAllFacts = async () => {
-      if (!allFactsCache) allFactsCache = await this.longTermMemory.getAll();
-      return allFactsCache;
-    };
-
-    // Fallback 1: Questions sur l'identité (nom, prénom)
-    if (relevantFacts.length === 0 && /comment.*appelle|quel.*nom|mon nom|mon prénom/i.test(userMessage)) {
-      console.log('🔄 Fallback: recherche faits identité');
-      relevantFacts = (await getAllFacts()).filter(f =>
-        f.predicate === "s'appelle" || f.predicate === "nom" || f.subject === "Utilisateur"
-      );
-    }
-
-    // Fallback 2: Questions générales "que sais-tu de moi"
-    if (relevantFacts.length === 0 && /que sais.*moi|connais.*moi|sais de moi/i.test(userMessage)) {
-      console.log('🔄 Fallback: récupère TOUS les faits utilisateur');
-      relevantFacts = (await getAllFacts()).filter(f => {
-        const sub = f.subject.toLowerCase();
-        return sub === 'patrick' || sub === 'utilisateur' || sub === userName?.toLowerCase();
-      });
-    }
-
-    // Fallback 3: Si question sur animaux et pas de résultats, cherche TOUS les faits d'animaux
-    if (relevantFacts.length === 0 && /animaux|animal|chat|chien|canari|souris|oiseau/i.test(userMessage)) {
-      console.log('🔄 Fallback: recherche tous les animaux');
-      relevantFacts = (await getAllFacts()).filter(f =>
-        /chat|chien|canari|souris|oiseau|animal|possède|a un|nommé/i.test(f.predicate) ||
-        /chat|chien|canari|souris|oiseau|Belphégor|Pixel|CuiCui|Mimi/i.test(f.objects.join(' '))
-      );
-    }
-
-    // Fallback 4: Questions sur les goûts (aime, préfère)
-    if (relevantFacts.length === 0 && /aime|préfère|goûts|aliments|nourriture/i.test(userMessage)) {
-      console.log('🔄 Fallback: recherche tous les goûts');
-      relevantFacts = (await getAllFacts()).filter(f =>
-        f.predicate === 'aime' || f.predicate === 'préfère' || f.predicate === 'adore'
-      );
-    }
-
-    console.log(`📚 ${relevantFacts.length} faits pertinents trouvés`);
-
-    // 5. Construction du contexte mémoire EXPLICITE
-    let memoryContext = "\n\n═══════════════════════════════════════";
-    memoryContext += "\n        MÉMOIRE LONG TERME";
-    memoryContext += "\n═══════════════════════════════════════";
-
-    if (userName) {
-      memoryContext += `\n\n👤 Utilisateur : ${userName}`;
-    }
-
-    if (relevantFacts.length > 0) {
-      memoryContext += "\n\n📋 FAITS CONNUS (UTILISE CES INFORMATIONS EXACTEMENT) :\n";
-
-      // Groupe par catégorie pour faciliter le comptage
-      const grouped = relevantFacts.reduce((acc, f) => {
-        let category = f.predicate;
-
-        // Simplifie les catégories
-        if (/chat.*nommé|a un chat/i.test(category)) category = 'chat';
-        else if (/chien.*nommé|a un chien/i.test(category)) category = 'chien';
-        else if (/canari.*nommé|a un canari/i.test(category)) category = 'canari';
-        else if (/souris.*nommé|a une souris/i.test(category)) category = 'souris';
-        else if (/aime/i.test(category)) category = 'aime';
-
-        if (!acc[category]) acc[category] = [];
-        acc[category].push(...f.objects);
-        return acc;
-      }, {} as Record<string, string[]>);
-
-      Object.entries(grouped).forEach(([cat, items]) => {
-        const uniqueItems = [...new Set(items)];
-        if (uniqueItems.length > 1) {
-          memoryContext += `  • ${cat} : ${uniqueItems.join(', ')} [TOTAL: ${uniqueItems.length}]\n`;
-        } else {
-          memoryContext += `  • ${cat} : ${uniqueItems[0]}\n`;
-        }
-      });
-
-      // Si question sur nombre d'animaux, compte explicitement
-      if (/combien.*animaux/i.test(userMessage)) {
-        const animalCategories = Object.keys(grouped).filter(k =>
-          ['chat', 'chien', 'canari', 'souris', 'oiseau', 'lapin', 'poisson'].includes(k.toLowerCase())
-        );
-        if (animalCategories.length > 0) {
-          memoryContext += `\n⚠️  IMPORTANT : L'utilisateur a ${animalCategories.length} animaux au total.\n`;
-        }
-      }
-    } else {
-      memoryContext += "\n\n❌ AUCUN FAIT PERTINENT dans la mémoire pour cette question.";
-      memoryContext += "\n   → Réponds clairement : \"Je n'ai pas cette information en mémoire.\"\n";
-    }
-
-    memoryContext += "\n═══════════════════════════════════════\n";
-
-    // 6. Préparation des messages pour LLM
-    this.memory.addMessage('user', userMessage);
-
-    const toolDescriptions = this.toolSystem.getToolDescriptions();
-    const now = new Date();
-    const dateContext = `\n\n### DATE ET HEURE ACTUELLES\nAujourd'hui : ${now.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} — ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.\nUtilise toujours cette date comme référence.`;
-    const systemContent = SYSTEM_PROMPT + dateContext + memoryContext + '\n\n' + toolDescriptions;
-    const allMessages = [
-      { role: 'system', content: systemContent },
-      ...this.memory.getMessages()
-    ];
-
-    // Estimation tokens du prompt
-    const promptTokens = allMessages.reduce((sum, m) => sum + this.estimateTokens(m.content), 0);
-    const available = this.CTX_SIZE - promptTokens;
-    console.log(`📊 Tokens estimés — prompt: ~${promptTokens}, disponibles pour réponse: ~${available}`);
-
-    if (available < 100) {
-      const warning = `⚠️ Le contexte est saturé (~${promptTokens} tokens utilisés sur ${this.CTX_SIZE}). Je ne peux pas répondre correctement. Essaie de vider l'historique ou de poser une question plus courte.`;
-      this.memory.addMessage('assistant', warning);
-      return { message: warning };
-    }
-
-    if (available < 400) {
-      console.warn(`⚠️ Peu de tokens disponibles pour la réponse (~${available})`);
-    }
-
-    const effectiveMaxTokens = Math.min(this.MAX_TOKENS, available - 50);
+    // 7. CONTEXTE LLM + APPEL LLM (factorisé)
+    const ctx = await this.buildLLMContext(userMessage, userName);
+    if ('saturation' in ctx) return { message: ctx.saturation };
 
     const t3 = Date.now();
     const response = await this.llm.chat({
       model: this.model,
-      messages: allMessages,
+      messages: ctx.allMessages,
       options: {
         temperature: 0.3,
-        max_tokens: effectiveMaxTokens,
+        max_tokens: ctx.effectiveMaxTokens,
         stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant']
       }
     });
     console.log(`⏱️  Génération LLM en ${Date.now() - t3}ms`);
 
-    let assistantMessage = response.message.content;
-
-    // 7. Nettoyage des marqueurs système et blocs de raisonnement
-    // Supprime les blocs <think>...</think> ou [THINK]...[/THINK] (deepseek-r1, qwen-thinking, etc.)
-    assistantMessage = assistantMessage
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/\[THINK\][\s\S]*?\[\/THINK\]/gi, '')
-      .replace(/\[THINKING\][\s\S]*?\[\/THINKING\]/gi, '')
-      .replace(/###\s*(Assistant|User|System|Utilisateur|LIZZI):?/gi, '')
-      .replace(/^(Assistant|Lizzi|Réponse)[\s:]+/gi, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    // Garde seulement la première réponse si plusieurs tours
-    const firstResponse = assistantMessage.split(/\n(?:User|Assistant|Utilisateur):/i)[0];
-    if (firstResponse.length > 0) {
-      assistantMessage = firstResponse.trim();
-    }
+    let assistantMessage = this.cleanLLMResponse(response.message.content);
 
     // 8. Gestion des outils
     let calendarAction: { year: number; month: number } | undefined;
@@ -645,22 +498,227 @@ export class Assistant {
         ],
         options: { temperature: 0.3 }
       });
-      assistantMessage = followUp.message.content
-        .replace(/<think>[\s\S]*?<\/think>/gi, '')
-        .replace(/\[THINK\][\s\S]*?\[\/THINK\]/gi, '')
-        .replace(/\[THINKING\][\s\S]*?\[\/THINKING\]/gi, '')
-        .replace(/###\s*(Assistant|User|System):?/gi, '')
-        .trim();
+      assistantMessage = this.cleanLLMResponse(followUp.message.content);
     }
 
     this.memory.addMessage('assistant', assistantMessage);
 
     // Statistiques tokens (retournées séparément, pas dans le texte vocal)
     const responseTokens = this.estimateTokens(assistantMessage);
-    const tokenInfo = `~${promptTokens} tokens prompt · ~${responseTokens} tokens réponse · ${this.CTX_SIZE - promptTokens - responseTokens} restants`;
+    const tokenInfo = `~${ctx.promptTokens} tokens prompt · ~${responseTokens} tokens réponse · ${this.CTX_SIZE - ctx.promptTokens - responseTokens} restants`;
 
     console.log(`⏱️  TEMPS TOTAL: ${Date.now() - startTime}ms`);
     return { message: assistantMessage, tokenInfo, calendarAction };
+  }
+
+  // --- MÉTHODES PRIVÉES : PRÉPARATION DU CONTEXTE LLM ---
+
+  /** Construit les messages prêts à envoyer au LLM (embedding, mémoire, formatage). */
+  private async buildLLMContext(userMessage: string, userName: string | null): Promise<
+    { allMessages: Array<{ role: string; content: string }>; effectiveMaxTokens: number; promptTokens: number } |
+    { saturation: string }
+  > {
+    const expandedQuery = this.expandQuery(userMessage);
+    console.log('🔎 Requête élargie:', expandedQuery);
+
+    const t1 = Date.now();
+    const queryVector = await this.longTermMemory.generateEmbedding(expandedQuery);
+    console.log(`⏱️  Embedding généré en ${Date.now() - t1}ms`);
+
+    const t2 = Date.now();
+    let relevantFacts = await this.longTermMemory.vectorSearch(queryVector, 0.35);
+    console.log(`⏱️  Recherche vectorielle en ${Date.now() - t2}ms`);
+
+    const cacheStatus = this.longTermMemory.getCacheStatus();
+    console.log(`📊 Cache: ${cacheStatus.cachedVectors}/${cacheStatus.totalFacts} vecteurs (${cacheStatus.missingVectors} manquants)`);
+
+    let allFactsCache: Fact[] | null = null;
+    const getAllFacts = async () => { if (!allFactsCache) allFactsCache = await this.longTermMemory.getAll(); return allFactsCache; };
+
+    if (relevantFacts.length === 0 && /comment.*appelle|quel.*nom|mon nom|mon prénom/i.test(userMessage))
+      relevantFacts = (await getAllFacts()).filter(f => f.predicate === "s'appelle" || f.predicate === 'nom' || f.subject === 'Utilisateur');
+    if (relevantFacts.length === 0 && /que sais.*moi|connais.*moi|sais de moi/i.test(userMessage))
+      relevantFacts = (await getAllFacts()).filter(f => { const s = f.subject.toLowerCase(); return s === 'patrick' || s === 'utilisateur' || s === userName?.toLowerCase(); });
+    if (relevantFacts.length === 0 && /animaux|animal|chat|chien|canari|souris|oiseau/i.test(userMessage))
+      relevantFacts = (await getAllFacts()).filter(f => /chat|chien|canari|souris|oiseau|animal|possède|a un|nommé/i.test(f.predicate) || /chat|chien|canari|souris|oiseau|Belphégor|Pixel|CuiCui|Mimi/i.test(f.objects.join(' ')));
+    if (relevantFacts.length === 0 && /aime|préfère|goûts|aliments|nourriture/i.test(userMessage))
+      relevantFacts = (await getAllFacts()).filter(f => f.predicate === 'aime' || f.predicate === 'préfère' || f.predicate === 'adore');
+
+    console.log(`📚 ${relevantFacts.length} faits pertinents trouvés`);
+
+    let memoryContext = "\n\n═══════════════════════════════════════";
+    memoryContext += "\n        MÉMOIRE LONG TERME";
+    memoryContext += "\n═══════════════════════════════════════";
+    if (userName) memoryContext += `\n\n👤 Utilisateur : ${userName}`;
+
+    if (relevantFacts.length > 0) {
+      memoryContext += "\n\n📋 FAITS CONNUS (UTILISE CES INFORMATIONS EXACTEMENT) :\n";
+      const grouped = relevantFacts.reduce((acc, f) => {
+        let category = f.predicate;
+        if (/chat.*nommé|a un chat/i.test(category)) category = 'chat';
+        else if (/chien.*nommé|a un chien/i.test(category)) category = 'chien';
+        else if (/canari.*nommé|a un canari/i.test(category)) category = 'canari';
+        else if (/souris.*nommé|a une souris/i.test(category)) category = 'souris';
+        else if (/aime/i.test(category)) category = 'aime';
+        if (!acc[category]) acc[category] = [];
+        acc[category].push(...f.objects);
+        return acc;
+      }, {} as Record<string, string[]>);
+      Object.entries(grouped).forEach(([cat, items]) => {
+        const unique = [...new Set(items)];
+        memoryContext += unique.length > 1
+          ? `  • ${cat} : ${unique.join(', ')} [TOTAL: ${unique.length}]\n`
+          : `  • ${cat} : ${unique[0]}\n`;
+      });
+      if (/combien.*animaux/i.test(userMessage)) {
+        const animalCats = Object.keys(grouped).filter(k => ['chat', 'chien', 'canari', 'souris', 'oiseau', 'lapin', 'poisson'].includes(k.toLowerCase()));
+        if (animalCats.length > 0) memoryContext += `\n⚠️  IMPORTANT : L'utilisateur a ${animalCats.length} animaux au total.\n`;
+      }
+    } else {
+      memoryContext += "\n\n❌ AUCUN FAIT PERTINENT dans la mémoire pour cette question.";
+      memoryContext += "\n   → Réponds clairement : \"Je n'ai pas cette information en mémoire.\"\n";
+    }
+    memoryContext += "\n═══════════════════════════════════════\n";
+
+    this.memory.addMessage('user', userMessage);
+
+    const now = new Date();
+    const dateContext = `\n\n### DATE ET HEURE ACTUELLES\nAujourd'hui : ${now.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} — ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.\nUtilise toujours cette date comme référence.`;
+    const systemContent = SYSTEM_PROMPT + dateContext + memoryContext + '\n\n' + this.toolSystem.getToolDescriptions();
+    const allMessages = [{ role: 'system', content: systemContent }, ...this.memory.getMessages()];
+
+    const promptTokens = allMessages.reduce((sum, m) => sum + this.estimateTokens(m.content), 0);
+    const available = this.CTX_SIZE - promptTokens;
+    console.log(`📊 Tokens estimés — prompt: ~${promptTokens}, disponibles pour réponse: ~${available}`);
+
+    if (available < 100) {
+      const warning = `⚠️ Le contexte est saturé (~${promptTokens} tokens utilisés sur ${this.CTX_SIZE}). Je ne peux pas répondre correctement. Essaie de vider l'historique ou de poser une question plus courte.`;
+      this.memory.addMessage('assistant', warning);
+      return { saturation: warning };
+    }
+    if (available < 400) console.warn(`⚠️ Peu de tokens disponibles pour la réponse (~${available})`);
+
+    const effectiveMaxTokens = Math.min(this.MAX_TOKENS, available - 50);
+    return { allMessages, effectiveMaxTokens, promptTokens };
+  }
+
+  /** Nettoie la réponse brute du LLM (blocs think, marqueurs système). */
+  private cleanLLMResponse(raw: string): string {
+    return raw
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/\[THINK\][\s\S]*?\[\/THINK\]/gi, '')
+      .replace(/\[THINKING\][\s\S]*?\[\/THINKING\]/gi, '')
+      .replace(/###\s*(Assistant|User|System|Utilisateur|LIZZI):?/gi, '')
+      .replace(/^(Assistant|Lizzi|Réponse)[\s:]+/gi, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+      .split(/\n(?:User|Assistant|Utilisateur):/i)[0]
+      .trim();
+  }
+
+  // --- STREAMING ---
+
+  async *chatStream(userMessage: string): AsyncGenerator<StreamEvent> {
+    const startTime = Date.now();
+    const userName = await this.getUserName();
+
+    // Pour tous les cas spéciaux (gestion du nom, mémoire explicite, agenda direct),
+    // on délègue à chat() car ces chemins sont rapides (<500ms) et peu fréquents.
+    const isSpecialCase =
+      !userName ||
+      this.pendingDeletion !== null ||
+      this.memoryDetector.detect(userMessage) ||
+      this.isCalendarCreateIntent(userMessage) ||
+      this.isCalendarShowIntent(userMessage) ||
+      this.isCalendarDeleteIntent(userMessage);
+
+    if (isSpecialCase) {
+      try {
+        const result = await this.chat(userMessage);
+        yield { type: 'token', text: result.message };
+        yield { type: 'done', message: result.message, tokenInfo: result.tokenInfo, calendarAction: result.calendarAction };
+      } catch (e: any) {
+        yield { type: 'error', message: e.message };
+      }
+      return;
+    }
+
+    // Chemin normal : streaming LLM réel
+    yield { type: 'thinking' };
+
+    const ctx = await this.buildLLMContext(userMessage, userName);
+    if ('saturation' in ctx) {
+      yield { type: 'token', text: ctx.saturation };
+      yield { type: 'done', message: ctx.saturation };
+      return;
+    }
+
+    // Stream avec filtrage des blocs [THINK]...[/THINK]
+    const THINK_OPENS = ['[THINK]', '<think>', '[THINKING]'];
+    const THINK_CLOSES = ['[/THINK]', '</think>', '[/THINKING]'];
+    let buffer = '';
+    let thinkDone = false;
+    let fullResponse = '';
+
+    for await (const chunk of this.llm.chatStream({
+      model: this.model,
+      messages: ctx.allMessages,
+      options: { temperature: 0.3, max_tokens: ctx.effectiveMaxTokens, stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant'] }
+    })) {
+      buffer += chunk;
+
+      if (!thinkDone) {
+        const closeTag = THINK_CLOSES.find(t => buffer.includes(t));
+        if (closeTag) {
+          // Fin du bloc think : on émet ce qui vient après
+          const afterThink = buffer.slice(buffer.indexOf(closeTag) + closeTag.length).trimStart();
+          thinkDone = true;
+          buffer = '';
+          if (afterThink) { yield { type: 'token', text: afterThink }; fullResponse += afterThink; }
+        } else if (!THINK_OPENS.some(t => buffer.startsWith(t) || buffer.includes(t)) && buffer.length > 14) {
+          // Pas de bloc think — on commence à streamer directement
+          thinkDone = true;
+          yield { type: 'token', text: buffer };
+          fullResponse += buffer;
+          buffer = '';
+        }
+        // sinon: on est dans le bloc think, on continue d'accumuler
+      } else {
+        yield { type: 'token', text: chunk };
+        fullResponse += chunk;
+        buffer = '';
+      }
+    }
+
+    // Vider le buffer restant
+    if (buffer.length > 0 && thinkDone) { yield { type: 'token', text: buffer }; fullResponse += buffer; }
+
+    // Nettoyage post-stream
+    let assistantMessage = this.cleanLLMResponse(fullResponse);
+
+    // Gestion outils (tool call détecté dans la réponse)
+    let calendarAction: { year: number; month: number } | undefined;
+    const toolCall = this.detectToolCall(assistantMessage);
+    if (toolCall?.tool) {
+      const toolResult = await this.toolSystem.executeTool(toolCall.tool, toolCall.params);
+      if (toolResult.showCalendar) calendarAction = toolResult.showCalendar;
+      const followUp = await this.llm.chat({
+        model: this.model,
+        messages: [
+          ...this.memory.getMessages(),
+          { role: 'assistant', content: assistantMessage },
+          { role: 'user', content: `Résultat de l'outil ${toolCall.tool} : ${JSON.stringify(toolResult, null, 2)}\n\nFormule une réponse naturelle TRÈS COURTE (2 phrases max) avec ce résultat.` }
+        ],
+        options: { temperature: 0.3 }
+      });
+      assistantMessage = this.cleanLLMResponse(followUp.message.content);
+    }
+
+    this.memory.addMessage('assistant', assistantMessage);
+    const responseTokens = this.estimateTokens(assistantMessage);
+    const tokenInfo = `~${ctx.promptTokens} tokens prompt · ~${responseTokens} tokens réponse · ${this.CTX_SIZE - ctx.promptTokens - responseTokens} restants`;
+    console.log(`⏱️  STREAM TOTAL: ${Date.now() - startTime}ms`);
+    yield { type: 'done', message: assistantMessage, tokenInfo, calendarAction };
   }
 
   // --- MÉTHODES API POUR SERVER.TS ---

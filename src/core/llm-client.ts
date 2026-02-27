@@ -76,6 +76,56 @@ export class LlamaCppClient {
     }
   }
 
+  async *chatStream(params: {
+    model?: string;
+    messages: Message[];
+    options?: ChatOptions;
+  }): AsyncGenerator<string> {
+    const { messages, options = {} } = params;
+
+    const requestBody = {
+      messages,
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.max_tokens ?? -1,
+      stop: options.stop,
+      stream: true
+    };
+
+    const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let leftover = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      leftover += decoder.decode(value, { stream: true });
+      const lines = leftover.split('\n');
+      leftover = lines.pop() ?? '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') return;
+        try {
+          const parsed = JSON.parse(raw);
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) yield content;
+        } catch { /* ligne SSE non-JSON, on ignore */ }
+      }
+    }
+  }
+
   async embeddings(params: {
     model?: string;
     prompt: string;

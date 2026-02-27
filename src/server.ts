@@ -68,6 +68,55 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
+// API - Chat en streaming SSE
+app.post('/api/chat/stream', async (req, res) => {
+  const { message, sessionId = 'default' } = req.body;
+
+  if (!message) {
+    res.status(400).json({ error: 'Message requis' });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const sendEvent = (event: string, data: object) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  if (!assistants.has(sessionId)) {
+    const newAssistant = new Assistant();
+    await newAssistant.initialize();
+    assistants.set(sessionId, newAssistant);
+  }
+  sessionActivity.set(sessionId, Date.now());
+
+  const assistant = assistants.get(sessionId)!;
+
+  try {
+    for await (const event of assistant.chatStream(message)) {
+      if (event.type === 'thinking') {
+        sendEvent('thinking', {});
+      } else if (event.type === 'token') {
+        sendEvent('token', { text: event.text });
+      } else if (event.type === 'done') {
+        sendEvent('done', {
+          message: event.message,
+          tokenInfo: event.tokenInfo,
+          calendarAction: event.calendarAction ?? null
+        });
+      } else if (event.type === 'error') {
+        sendEvent('error', { message: event.message });
+      }
+    }
+  } catch (err) {
+    sendEvent('error', { message: String(err) });
+  }
+
+  res.end();
+});
+
 // API - Chat avec l'assistant
 app.post('/api/chat', async (req, res) => {
   try {

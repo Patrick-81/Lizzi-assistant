@@ -1273,40 +1273,85 @@
       sendBtn.disabled = true;
       document.getElementById('loading').classList.add('active');
 
+      // Bulle assistant créée immédiatement pour le streaming
+      const chatContainer = document.getElementById('chatContainer');
+      const bubbleDiv = document.createElement('div');
+      bubbleDiv.className = 'message assistant';
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'message-content';
+      contentDiv.textContent = '';
+      bubbleDiv.appendChild(contentDiv);
+      chatContainer.appendChild(bubbleDiv);
+
+      let fullText = '';
+      let tokenInfo = '';
+      let calendarAction = null;
+
       try {
-        const response = await fetch(`${API_URL}/api/chat`, {
+        const response = await fetch(`${API_URL}/api/chat/stream`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message, sessionId })
         });
 
-        const data = await response.json();
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-        if (data.error) {
-          addMessage('Une erreur est survenue : ' + data.error, false);
-        } else {
-          addMessage(data.response, false, data.tokenInfo);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-          if (voiceEnabled) {
-            speakText(data.response);
-          }
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
 
-          if (data.calendarAction) {
-            const { year, month } = data.calendarAction;
-            calendarYear = year;
-            calendarMonth = month;
-            switchTab('calendar');
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop(); // conserver le fragment incomplet
+
+          for (const part of parts) {
+            if (!part.trim()) continue;
+            const lines = part.split('\n');
+            let eventType = '';
+            let dataStr = '';
+            for (const line of lines) {
+              if (line.startsWith('event: ')) eventType = line.slice(7);
+              else if (line.startsWith('data: ')) dataStr = line.slice(6);
+            }
+            if (!eventType || !dataStr) continue;
+            const data = JSON.parse(dataStr);
+
+            if (eventType === 'token') {
+              fullText += data.text;
+              contentDiv.innerHTML = marked.parse(fullText);
+              chatContainer.scrollTop = chatContainer.scrollHeight;
+            } else if (eventType === 'done') {
+              fullText = data.message;
+              tokenInfo = data.tokenInfo || '';
+              calendarAction = data.calendarAction;
+              contentDiv.innerHTML = marked.parse(fullText);
+              if (tokenInfo) {
+                const meta = document.createElement('div');
+                meta.className = 'token-info';
+                meta.textContent = tokenInfo;
+                bubbleDiv.appendChild(meta);
+              }
+              chatContainer.scrollTop = chatContainer.scrollHeight;
+              if (voiceEnabled && fullText) speakText(fullText);
+              if (calendarAction) {
+                calendarYear = calendarAction.year;
+                calendarMonth = calendarAction.month;
+                switchTab('calendar');
+              }
+            } else if (eventType === 'error') {
+              contentDiv.textContent = 'Erreur : ' + (data.message || 'inconnue');
+            }
           }
         }
       } catch (error) {
-        addMessage('Impossible de contacter le serveur.', false);
+        contentDiv.textContent = 'Impossible de contacter le serveur.';
       } finally {
         sendBtn.disabled = false;
         document.getElementById('loading').classList.remove('active');
-        // Focus enlevé pour permettre push-to-talk par défaut
-        // input.focus();
       }
     }
 
