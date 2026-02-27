@@ -11,6 +11,8 @@ export class SpeechRecognition {
   private whisperPath: string;
   private modelPath: string;
   private tempDir: string;
+  private contextPromptCache: { value: string; expiresAt: number } | null = null;
+  private static readonly CONTEXT_PROMPT_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   constructor() {
     const projectRoot = path.join(__dirname, '../..');
@@ -65,7 +67,11 @@ export class SpeechRecognition {
    * Génère un prompt contexte pour améliorer la reconnaissance
    */
   private async generateContextPrompt(): Promise<string> {
-    // Prompt de base avec vocabulaire français courant
+    const now = Date.now();
+    if (this.contextPromptCache && now < this.contextPromptCache.expiresAt) {
+      return this.contextPromptCache.value;
+    }
+
     let prompt = 'Bonjour, je parle en français. ';
     
     // Ajoute les noms importants depuis la mémoire (si disponible)
@@ -98,7 +104,8 @@ export class SpeechRecognition {
     
     // Ajoute des mots-clés courants pour l'assistant
     prompt += 'Lizzi assistant animaux.';
-    
+
+    this.contextPromptCache = { value: prompt, expiresAt: Date.now() + SpeechRecognition.CONTEXT_PROMPT_TTL_MS };
     return prompt;
   }
 
@@ -115,13 +122,6 @@ export class SpeechRecognition {
       const contextPrompt = await this.generateContextPrompt();
       
       // Whisper options optimisées pour vitesse ET précision
-      // -m : modèle
-      // -f : fichier audio
-      // -l : langue (fr pour français)
-      // -t : nombre de threads (max CPU)
-      // -nt : pas de timestamps dans le texte
-      // -np : no prints (seulement le résultat)
-      // --prompt : contexte français pour améliorer la reconnaissance
       const whisper = spawn(this.whisperPath, [
         '-m', this.modelPath,
         '-f', audioFilePath,
@@ -131,6 +131,11 @@ export class SpeechRecognition {
         '-np',             // No prints (only result)
         '--prompt', contextPrompt
       ]);
+
+      const timeout = setTimeout(() => {
+        whisper.kill('SIGKILL');
+        reject(new Error('Whisper timeout (60s dépassé)'));
+      }, 60_000);
 
       let output = '';
       let errorOutput = '';
@@ -144,10 +149,10 @@ export class SpeechRecognition {
       });
 
       whisper.on('close', (code) => {
+        clearTimeout(timeout);
         console.log(`⏱️  Whisper transcription: ${Date.now() - t0}ms`);
         
         if (code === 0) {
-          // Extrait le texte transcrit (généralement après les logs)
           const transcription = this.extractTranscription(output);
           resolve(transcription);
         } else {
@@ -156,6 +161,7 @@ export class SpeechRecognition {
       });
 
       whisper.on('error', (error) => {
+        clearTimeout(timeout);
         reject(error);
       });
     });
@@ -243,6 +249,11 @@ export class SpeechRecognition {
         outputPath
       ]);
 
+      const timeout = setTimeout(() => {
+        ffmpeg.kill('SIGKILL');
+        reject(new Error('ffmpeg timeout (30s dépassé)'));
+      }, 30_000);
+
       let errorOutput = '';
 
       ffmpeg.stderr.on('data', (data) => {
@@ -250,6 +261,7 @@ export class SpeechRecognition {
       });
 
       ffmpeg.on('close', (code) => {
+        clearTimeout(timeout);
         if (code === 0) {
           console.log(`✅ Conversion réussie: ${path.basename(outputPath)} (${Date.now() - t0}ms)`);
           resolve();
@@ -260,6 +272,7 @@ export class SpeechRecognition {
       });
 
       ffmpeg.on('error', (error) => {
+        clearTimeout(timeout);
         console.error(`❌ Erreur spawn ffmpeg:`, error);
         reject(error);
       });

@@ -7,6 +7,7 @@ import { LongTermMemory, Fact } from './long-term-memory.js';
 import { MemoryDetector } from './memory-detector.js';
 import { SemanticExtractor } from './semantic-extractor.js';
 import { ToolSystem } from './tools.js';
+import { LocalCalendarClient } from './local-calendar.js';
 
 
 export class Assistant {
@@ -18,9 +19,11 @@ export class Assistant {
   private memoryDetector: MemoryDetector;
   private semanticExtractor: SemanticExtractor;
   private toolSystem: ToolSystem;
+  private localCalendar: LocalCalendarClient;
   private model: string;
   private embeddingModel: string;
   private hasAskedName: boolean = false;
+  private pendingDeletion: { event: any } | null = null;
 
   private readonly CTX_SIZE = parseInt(process.env.CTX_SIZE || '4096');
   private readonly MAX_TOKENS = 1500;
@@ -48,10 +51,22 @@ export class Assistant {
     this.memoryDetector = new MemoryDetector();
     this.semanticExtractor = new SemanticExtractor(this.llm, this.model);
     this.toolSystem = new ToolSystem();
+    this.localCalendar = new LocalCalendarClient();
   }
 
   async initialize() {
     await this.longTermMemory.initialize(this.embeddingClient, this.embeddingModel);
+    this.toolSystem.setMemoryContext({
+      longTermMemory: this.longTermMemory,
+      embeddingClient: this.embeddingClient,
+      embeddingModel: this.embeddingModel
+    });
+    await this.localCalendar.initialize();
+    this.toolSystem.setCalendarContext(this.localCalendar);
+  }
+
+  getCalendarClient(): LocalCalendarClient {
+    return this.localCalendar;
   }
 
   private async getUserName(): Promise<string | null> {
@@ -71,6 +86,165 @@ export class Assistant {
       try { return JSON.parse(directMatch[0]); } catch { return null; }
     }
     try { return JSON.parse(jsonMatch[1]); } catch { return null; }
+  }
+
+  /** Détecte si le message demande de créer un événement dans l'agenda */
+  private isCalendarCreateIntent(text: string): boolean {
+    const hasDate = /\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/.test(text) || /\bdemain\b/i.test(text);
+    const hasTime = /\bà \d{1,2}h\d{0,2}\b/i.test(text) || /\b\d{2}:\d{2}\b/.test(text);
+    const hasCalendarAction = /\bagenda\b|\bcalendrier\b/i.test(text) &&
+      /\bnote|enregistre|ajoute|inscris|mets|crée|planifie\b/i.test(text);
+    return hasCalendarAction && (hasDate || hasTime);
+  }
+
+  /** Détecte si le message demande d'afficher l'agenda */
+  private isCalendarShowIntent(text: string): boolean {
+    return /\b(montre|affiche|montre-moi|affiche-moi|voir|consulte?r?|présente)\b.{0,30}\b(agenda|calendrier)\b/i.test(text) ||
+      /\b(agenda|calendrier)\b.{0,30}\b(f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[eé]cembre|janvier)\b/i.test(text) ||
+      /\bqu'est-ce que j'ai (pr[eé]vu|planifi[eé])\b/i.test(text);
+  }
+
+  /** Extrait les détails d'un événement depuis le texte */
+  private parseEventFromText(text: string): { summary: string; start: string; end: string } | null {
+    const MONTHS: Record<string, number> = {
+      janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, mai: 5,
+      juin: 6, juillet: 7, août: 8, aout: 8, septembre: 9,
+      octobre: 10, novembre: 11, décembre: 12, decembre: 12
+    };
+
+    let year: number | null = null, month: number | null = null, day: number | null = null;
+    let hours = 12, minutes = 0;
+
+    // Date JJ/MM/AAAA ou JJ-MM-AAAA
+    const dmy = text.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b/);
+    if (dmy) { day = parseInt(dmy[1]); month = parseInt(dmy[2]); year = parseInt(dmy[3]); }
+
+    // "demain"
+    if (!day && /\bdemain\b/i.test(text)) {
+      const d = new Date(); d.setDate(d.getDate() + 1);
+      day = d.getDate(); month = d.getMonth() + 1; year = d.getFullYear();
+    }
+
+    // Heure "à 12h00" ou "12:00"
+    const hm = text.match(/\bà (\d{1,2})h(\d{0,2})\b/i) || text.match(/\b(\d{2}):(\d{2})\b/);
+    if (hm) { hours = parseInt(hm[1]); minutes = parseInt(hm[2] || '0'); }
+
+    if (!day || !month || !year) return null;
+
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const start = `${year}-${pad(month)}-${pad(day)}T${pad(hours)}:${pad(minutes)}:00`;
+
+    // Fin = début + 1h
+    const endDate = new Date(start);
+    endDate.setHours(endDate.getHours() + 1);
+    const end = endDate.toISOString().slice(0, 19);
+
+    // Titre : texte après ":" ou après le pattern date/heure, sinon tout le message
+    let summary = text;
+    const afterColon = text.match(/:\s*(.+)$/);
+    if (afterColon) {
+      summary = afterColon[1].trim();
+    } else {
+      // Retire les mots-clés d'action et les éléments date/heure
+      summary = text
+        .replace(/^(note|enregistre|ajoute|inscris|mets|crée|planifie)\s+(dans\s+mon\s+agenda|dans\s+mon\s+calendrier)?\s*/i, '')
+        .replace(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}\b/, '')
+        .replace(/\bdemain\b/i, '')
+        .replace(/\bà \d{1,2}h\d{0,2}\b/i, '')
+        .replace(/\b\d{2}:\d{2}\b/, '')
+        .replace(/^\s*[:\-,]\s*/, '')
+        .trim();
+    }
+
+    return summary.length > 0 ? { summary, start, end } : null;
+  }
+
+  /** Extrait le mois demandé dans une phrase "agenda de mars", "calendrier de février", etc. */
+  private parseMonthFromText(text: string): { year: number; month: number } {
+    const MONTHS: Record<string, number> = {
+      janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, mai: 5,
+      juin: 6, juillet: 7, août: 8, aout: 8, septembre: 9,
+      octobre: 10, novembre: 11, décembre: 12, decembre: 12
+    };
+    const lower = text.toLowerCase();
+    for (const [name, num] of Object.entries(MONTHS)) {
+      if (lower.includes(name)) {
+        const yearMatch = text.match(/\b(20\d{2})\b/);
+        const year = yearMatch ? parseInt(yearMatch[1]) : new Date().getFullYear();
+        return { year, month: num };
+      }
+    }
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() + 1 };
+  }
+
+  /** Détecte si le message demande de supprimer un événement */
+  private isCalendarDeleteIntent(text: string): boolean {
+    return /\b(supprime|annule|efface|retire|enlève|enleve|supprimer|annuler|effacer)\b/i.test(text) &&
+      /\bagenda\b|\bcalendrier\b|\bévenement\b|\bevenement\b|\brendez-vous\b|\brdv\b|\brepas\b|\bréunion\b|\breunion\b|\brappel\b|le \d|du \d|l'event|l'événement/i.test(text);
+  }
+
+  /** Extrait les mots-clés de recherche pour trouver l'événement à supprimer */
+  private extractDeleteKeywords(text: string): string {
+    return text
+      .replace(/\b(supprime|annule|efface|retire|enlève|enleve|supprimer|annuler|effacer)\b/gi, '')
+      .replace(/\b(dans mon agenda|de mon agenda|dans l'agenda|de l'agenda|dans le calendrier)\b/gi, '')
+      .replace(/\b(l'événement|l'evenement|le rendez-vous|le rdv|le repas|la réunion|mon|mes|cet|cette)\b/gi, '')
+      .replace(/\b(s'il te plait|stp|svp)\b/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  /** Cherche un événement dans le calendrier local et prépare la suppression avec confirmation */
+  private async deleteCalendarEvent(userMessage: string): Promise<string> {
+    const keywords = this.extractDeleteKeywords(userMessage);
+
+    const searchResult = await this.localCalendar.searchEvents(keywords, 20);
+    let candidates = searchResult.events as any[];
+
+    // Affinage par jour si présent dans le message
+    const dmy = userMessage.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b/);
+    const dayMatch = userMessage.match(/\ble (\d{1,2})\b/i);
+    const dateDay = dmy ? parseInt(dmy[1]) : (dayMatch ? parseInt(dayMatch[1]) : null);
+    if (dateDay && candidates.length > 1) {
+      const byDate = candidates.filter(ev => {
+        const d = new Date(ev.start.dateTime || ev.start.date || 0);
+        return d.getDate() === dateDay;
+      });
+      if (byDate.length > 0) candidates = byDate;
+    }
+
+    if (candidates.length === 0) {
+      // Dernière chance : match partiel mot par mot
+      const allResult = await this.localCalendar.searchEvents('', 100);
+      const kwLower = keywords.toLowerCase();
+      candidates = (allResult.events as any[]).filter(ev =>
+        kwLower.split(' ').some(w => w.length > 3 && ev.summary.toLowerCase().includes(w))
+      );
+    }
+
+    if (candidates.length === 0) {
+      return `Je n'ai trouvé aucun événement correspondant à "${keywords}" dans ton agenda. 🔍`;
+    }
+
+    if (candidates.length === 1) {
+      const ev = candidates[0];
+      const d = new Date(ev.start.dateTime || ev.start.date);
+      const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+      const timeStr = ev.start.dateTime
+        ? ` à ${d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`
+        : '';
+      this.pendingDeletion = { event: ev };
+      return `Tu veux supprimer "${ev.summary}" du ${dateStr}${timeStr} ? (oui / non)`;
+    }
+
+    // Plusieurs candidats → lister
+    const list = candidates.slice(0, 5).map((ev: any, i: number) => {
+      const d = new Date(ev.start.dateTime || ev.start.date);
+      const dateStr = d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
+      return `${i + 1}. ${ev.summary} — ${dateStr}`;
+    }).join('\n');
+    return `J'ai trouvé ${candidates.length} événements correspondants, lequel veux-tu supprimer ?\n${list}`;
   }
 
   /**
@@ -100,7 +274,7 @@ export class Assistant {
     return query;
   }
 
-  async chat(userMessage: string): Promise<{ message: string; tokenInfo?: string }> {
+  async chat(userMessage: string): Promise<{ message: string; tokenInfo?: string; calendarAction?: { year: number; month: number } }> {
     const startTime = Date.now();
     const userName = await this.getUserName();
 
@@ -120,6 +294,49 @@ export class Assistant {
       await this.longTermMemory.add("s'appelle", extractedName, "Utilisateur", this.llm);
       this.hasAskedName = false;
       return { message: `Enchanté ${extractedName} ! Je prends note. Comment puis-je t'aider ?` };
+    }
+
+    // 2b. CONFIRMATION DE SUPPRESSION en attente
+    if (this.pendingDeletion) {
+      const ev = this.pendingDeletion.event;
+      const lower = userMessage.toLowerCase().trim();
+      const isYes = /^(oui|yes|ok|yep|ouais|confirme|vas-y|go|sup|supprime|c'est ça|exact)/.test(lower);
+      const isNo  = /^(non|no|nope|annule|laisse|stop|ne supprime pas|garde)/.test(lower);
+
+      this.pendingDeletion = null;
+
+      if (isYes) {
+        try {
+          await this.localCalendar.deleteEvent(ev.id);
+          const d = new Date(ev.start.dateTime || ev.start.date);
+          const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+          const msg = `✅ "${ev.summary}" du ${dateStr} supprimé.`;
+          this.memory.addMessage('user', userMessage);
+          this.memory.addMessage('assistant', msg);
+          return { message: msg };
+        } catch (e: any) {
+          const msg = `❌ Erreur lors de la suppression : ${e.message}`;
+          this.memory.addMessage('user', userMessage);
+          this.memory.addMessage('assistant', msg);
+          return { message: msg };
+        }
+      }
+
+      if (isNo) {
+        const msg = `D'accord, je ne supprime rien. 👍`;
+        this.memory.addMessage('user', userMessage);
+        this.memory.addMessage('assistant', msg);
+        return { message: msg };
+      }
+
+      // Réponse ambiguë → on repose la question
+      const d = new Date(ev.start.dateTime || ev.start.date);
+      const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+      this.pendingDeletion = { event: ev }; // remet en attente
+      const msg = `Je n'ai pas compris. Tu veux supprimer "${ev.summary}" du ${dateStr} ? (oui / non)`;
+      this.memory.addMessage('user', userMessage);
+      this.memory.addMessage('assistant', msg);
+      return { message: msg };
     }
 
     // 3. MÉMORISATION : Vérifie si l'utilisateur demande d'enregistrer quelque chose
@@ -183,7 +400,66 @@ export class Assistant {
       console.log('⭕ Pas de mot-clé de mémorisation détecté');
     }
 
-    // 4. RECHERCHE SÉMANTIQUE avec requête élargie
+    // 4. AGENDA — Création d'événement détectée directement (sans passer par le LLM)
+    if (this.isCalendarCreateIntent(userMessage)) {
+      console.log('📅 Intention création agenda détectée');
+      const event = this.parseEventFromText(userMessage);
+      if (event) {
+        try {
+          const result = await this.toolSystem.executeTool('calendar', {
+            operation: 'create_event',
+            summary: event.summary,
+            start: event.start,
+            end: event.end
+          });
+          const startDate = new Date(event.start);
+          const dateStr = startDate.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+          const timeStr = startDate.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+          const msg = `✅ Noté dans ton agenda ! "${event.summary}" le ${dateStr} à ${timeStr}.`;
+          this.memory.addMessage('user', userMessage);
+          this.memory.addMessage('assistant', msg);
+          return { message: msg };
+        } catch (e: any) {
+          console.error('❌ Erreur création événement:', e.message);
+        }
+      }
+    }
+
+    // 5. AGENDA — Affichage détecté directement
+    if (this.isCalendarShowIntent(userMessage)) {
+      console.log('📅 Intention affichage agenda détectée');
+      const { year, month } = this.parseMonthFromText(userMessage);
+      try {
+        const result = await this.toolSystem.executeTool('calendar', {
+          operation: 'show_calendar', year, month
+        });
+        const monthName = new Date(year, month - 1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+        const evCount = (result.count as number) || 0;
+        const msg = evCount === 0
+          ? `Ton agenda de ${monthName} est vide. 📅`
+          : `Voici ton agenda de ${monthName} — ${evCount} événement(s). 📅\n${result.formatted}`;
+        this.memory.addMessage('user', userMessage);
+        this.memory.addMessage('assistant', msg);
+        return { message: msg, calendarAction: { year, month } };
+      } catch (e: any) {
+        console.error('❌ Erreur affichage agenda:', e.message);
+      }
+    }
+
+    // 6. AGENDA — Suppression d'événement détectée directement
+    if (this.isCalendarDeleteIntent(userMessage)) {
+      console.log('📅 Intention suppression agenda détectée');
+      try {
+        const msg = await this.deleteCalendarEvent(userMessage);
+        this.memory.addMessage('user', userMessage);
+        this.memory.addMessage('assistant', msg);
+        return { message: msg };
+      } catch (e: any) {
+        console.error('❌ Erreur suppression événement:', e.message);
+      }
+    }
+
+    // 7. RECHERCHE SÉMANTIQUE avec requête élargie
     const t1 = Date.now();
     const expandedQuery = this.expandQuery(userMessage);
     console.log('🔎 Requête élargie:', expandedQuery);
@@ -198,11 +474,17 @@ export class Assistant {
     const cacheStatus = this.longTermMemory.getCacheStatus();
     console.log(`📊 Cache: ${cacheStatus.cachedVectors}/${cacheStatus.totalFacts} vecteurs (${cacheStatus.missingVectors} manquants)`);
 
+    // Fallbacks : une seule récupération partagée
+    let allFactsCache: Fact[] | null = null;
+    const getAllFacts = async () => {
+      if (!allFactsCache) allFactsCache = await this.longTermMemory.getAll();
+      return allFactsCache;
+    };
+
     // Fallback 1: Questions sur l'identité (nom, prénom)
     if (relevantFacts.length === 0 && /comment.*appelle|quel.*nom|mon nom|mon prénom/i.test(userMessage)) {
       console.log('🔄 Fallback: recherche faits identité');
-      const allFacts = await this.longTermMemory.getAll();
-      relevantFacts = allFacts.filter(f =>
+      relevantFacts = (await getAllFacts()).filter(f =>
         f.predicate === "s'appelle" || f.predicate === "nom" || f.subject === "Utilisateur"
       );
     }
@@ -210,8 +492,7 @@ export class Assistant {
     // Fallback 2: Questions générales "que sais-tu de moi"
     if (relevantFacts.length === 0 && /que sais.*moi|connais.*moi|sais de moi/i.test(userMessage)) {
       console.log('🔄 Fallback: récupère TOUS les faits utilisateur');
-      const allFacts = await this.longTermMemory.getAll();
-      relevantFacts = allFacts.filter(f => {
+      relevantFacts = (await getAllFacts()).filter(f => {
         const sub = f.subject.toLowerCase();
         return sub === 'patrick' || sub === 'utilisateur' || sub === userName?.toLowerCase();
       });
@@ -220,8 +501,7 @@ export class Assistant {
     // Fallback 3: Si question sur animaux et pas de résultats, cherche TOUS les faits d'animaux
     if (relevantFacts.length === 0 && /animaux|animal|chat|chien|canari|souris|oiseau/i.test(userMessage)) {
       console.log('🔄 Fallback: recherche tous les animaux');
-      const allFacts = await this.longTermMemory.getAll();
-      relevantFacts = allFacts.filter(f =>
+      relevantFacts = (await getAllFacts()).filter(f =>
         /chat|chien|canari|souris|oiseau|animal|possède|a un|nommé/i.test(f.predicate) ||
         /chat|chien|canari|souris|oiseau|Belphégor|Pixel|CuiCui|Mimi/i.test(f.objects.join(' '))
       );
@@ -230,8 +510,7 @@ export class Assistant {
     // Fallback 4: Questions sur les goûts (aime, préfère)
     if (relevantFacts.length === 0 && /aime|préfère|goûts|aliments|nourriture/i.test(userMessage)) {
       console.log('🔄 Fallback: recherche tous les goûts');
-      const allFacts = await this.longTermMemory.getAll();
-      relevantFacts = allFacts.filter(f =>
+      relevantFacts = (await getAllFacts()).filter(f =>
         f.predicate === 'aime' || f.predicate === 'préfère' || f.predicate === 'adore'
       );
     }
@@ -295,7 +574,9 @@ export class Assistant {
     this.memory.addMessage('user', userMessage);
 
     const toolDescriptions = this.toolSystem.getToolDescriptions();
-    const systemContent = SYSTEM_PROMPT + memoryContext + '\n\n' + toolDescriptions;
+    const now = new Date();
+    const dateContext = `\n\n### DATE ET HEURE ACTUELLES\nAujourd'hui : ${now.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} — ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.\nUtilise toujours cette date comme référence.`;
+    const systemContent = SYSTEM_PROMPT + dateContext + memoryContext + '\n\n' + toolDescriptions;
     const allMessages = [
       { role: 'system', content: systemContent },
       ...this.memory.getMessages()
@@ -332,8 +613,12 @@ export class Assistant {
 
     let assistantMessage = response.message.content;
 
-    // 7. Nettoyage des marqueurs système
+    // 7. Nettoyage des marqueurs système et blocs de raisonnement
+    // Supprime les blocs <think>...</think> ou [THINK]...[/THINK] (deepseek-r1, qwen-thinking, etc.)
     assistantMessage = assistantMessage
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/\[THINK\][\s\S]*?\[\/THINK\]/gi, '')
+      .replace(/\[THINKING\][\s\S]*?\[\/THINKING\]/gi, '')
       .replace(/###\s*(Assistant|User|System|Utilisateur|LIZZI):?/gi, '')
       .replace(/^(Assistant|Lizzi|Réponse)[\s:]+/gi, '')
       .replace(/\n{3,}/g, '\n\n')
@@ -346,9 +631,13 @@ export class Assistant {
     }
 
     // 8. Gestion des outils
+    let calendarAction: { year: number; month: number } | undefined;
     const toolCall = this.detectToolCall(assistantMessage);
     if (toolCall && toolCall.tool) {
       const toolResult = await this.toolSystem.executeTool(toolCall.tool, toolCall.params);
+      if (toolResult.showCalendar) {
+        calendarAction = toolResult.showCalendar;
+      }
       const followUp = await this.llm.chat({
         model: this.model,
         messages: [
@@ -356,12 +645,15 @@ export class Assistant {
           { role: 'assistant', content: assistantMessage },
           {
             role: 'user',
-            content: `Résultat de l'outil ${toolCall.tool} : ${JSON.stringify(toolResult, null, 2)}\n\nFormule une réponse naturelle avec ce résultat.`
+            content: `Résultat de l'outil ${toolCall.tool} : ${JSON.stringify(toolResult, null, 2)}\n\nFormule une réponse naturelle TRÈS COURTE (2 phrases max) avec ce résultat.`
           }
         ],
         options: { temperature: 0.3 }
       });
       assistantMessage = followUp.message.content
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/\[THINK\][\s\S]*?\[\/THINK\]/gi, '')
+        .replace(/\[THINKING\][\s\S]*?\[\/THINKING\]/gi, '')
         .replace(/###\s*(Assistant|User|System):?/gi, '')
         .trim();
     }
@@ -373,7 +665,7 @@ export class Assistant {
     const tokenInfo = `~${promptTokens} tokens prompt · ~${responseTokens} tokens réponse · ${this.CTX_SIZE - promptTokens - responseTokens} restants`;
 
     console.log(`⏱️  TEMPS TOTAL: ${Date.now() - startTime}ms`);
-    return { message: assistantMessage, tokenInfo };
+    return { message: assistantMessage, tokenInfo, calendarAction };
   }
 
   // --- MÉTHODES API POUR SERVER.TS ---
@@ -405,9 +697,6 @@ export class Assistant {
   }
 
   async clearLongTermMemory(): Promise<void> {
-    const facts = await this.longTermMemory.getAll();
-    for (const fact of facts) {
-      await this.longTermMemory.delete(fact.id);
-    }
+    await this.longTermMemory.clearAll();
   }
 }

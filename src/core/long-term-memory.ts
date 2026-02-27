@@ -16,18 +16,21 @@ export interface Fact {
   updatedAt: string;
 }
 
+const EMBEDDING_BATCH_SIZE = 5;
+
 export class LongTermMemory {
   private memoryPath: string;
   private facts: Map<string, Fact> = new Map();
   private vectorCache: Map<string, number[]> = new Map();
-  private ollama: any = null;  // Stockage de l'instance Ollama
+  private ollama: any = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.memoryPath = path.join(process.cwd(), 'data', 'memories.json');
   }
 
-  async initialize(ollama: any) {
-    this.ollama = ollama;  // Sauvegarde l'instance Ollama pour usage ultérieur
+  async initialize(ollama: any, model?: string) {
+    this.ollama = ollama;  // Sauvegarde l'instance pour usage ultérieur
 
     try {
       const data = await fs.readFile(this.memoryPath, 'utf-8');
@@ -36,11 +39,15 @@ export class LongTermMemory {
       this.facts.clear();
       this.vectorCache.clear();
 
-      console.log(`⏳ Vectorisation de ${factsArray.length} faits en cours...`);
       for (const fact of factsArray) {
         this.facts.set(fact.id, fact);
-        const vector = await this.generateEmbedding(ollama, fact);
-        this.vectorCache.set(fact.id, vector);
+      }
+
+      console.log(`⏳ Vectorisation de ${factsArray.length} faits en cours (batch de ${EMBEDDING_BATCH_SIZE})...`);
+      for (let i = 0; i < factsArray.length; i += EMBEDDING_BATCH_SIZE) {
+        const batch = factsArray.slice(i, i + EMBEDDING_BATCH_SIZE);
+        const vectors = await Promise.all(batch.map(fact => this.generateEmbedding(ollama, model, fact)));
+        batch.forEach((fact, idx) => this.vectorCache.set(fact.id, vectors[idx]));
       }
       console.log(`✅ Mémoire prête : ${this.facts.size} faits, ${this.vectorCache.size} vecteurs.`);
     } catch (e) {
@@ -50,21 +57,21 @@ export class LongTermMemory {
     }
   }
 
-  async generateEmbedding(ollama: any, input: Fact | string): Promise<number[]> {
+  async generateEmbedding(ollama: any, model: string | undefined, input: Fact | string): Promise<number[]> {
     const text = typeof input === 'string'
       ? input
       : `${input.subject} ${input.predicate} ${input.objects.join(', ')}`;
 
     try {
       const response = await ollama.embeddings({
-        model: 'all-minilm',
+        model,
         prompt: text
       });
       return response.embedding;
     } catch (error) {
       console.error('❌ Erreur génération embedding:', error);
       // Retourne un vecteur vide en cas d'erreur pour ne pas bloquer
-      return new Array(384).fill(0); // all-minilm produit des vecteurs de 384 dimensions
+      return new Array(384).fill(0); // Dimension par défaut
     }
   }
 
@@ -85,7 +92,7 @@ export class LongTermMemory {
       for (const factId of missingVectors) {
         const fact = this.facts.get(factId);
         if (fact) {
-          const vector = await this.generateEmbedding(this.ollama, fact);
+          const vector = await this.generateEmbedding(this.ollama, undefined, fact);
           this.vectorCache.set(factId, vector);
           console.log(`✅ Vecteur régénéré pour ${factId}`);
         }
@@ -125,7 +132,15 @@ export class LongTermMemory {
     await fs.writeFile(this.memoryPath, JSON.stringify(factsArray, null, 2));
   }
 
-  async add(predicate: string, object: string, subject: string, ollama: any): Promise<Fact> {
+  private scheduleSave() {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      this.saveToFile().catch(err => console.error('❌ Erreur sauvegarde mémoire:', err));
+      this.saveTimer = null;
+    }, 500);
+  }
+
+  async add(predicate: string, object: string, subject: string, ollama: any, model?: string): Promise<Fact> {
     const id = `fact_${Date.now()}`;
     const newFact: Fact = {
       id,
@@ -141,16 +156,16 @@ export class LongTermMemory {
     this.facts.set(id, newFact);
 
     // IMPORTANT: Générer ET sauvegarder le vecteur immédiatement
-    const vector = await this.generateEmbedding(ollama, newFact);
+    const vector = await this.generateEmbedding(ollama, model, newFact);
     this.vectorCache.set(id, vector);
 
     console.log(`✅ Fait ajouté: ${subject} ${predicate} ${object} (vecteur: ${vector.length}D)`);
 
-    await this.saveToFile();
+    this.scheduleSave();
     return newFact;
   }
 
-  async update(id: string, predicate: string, objects: string[], subject: string, ollama: any): Promise<Fact | null> {
+  async update(id: string, predicate: string, objects: string[], subject: string, ollama: any, model?: string): Promise<Fact | null> {
     const fact = this.facts.get(id);
     if (!fact) {
       console.log(`❌ Fait ${id} introuvable pour mise à jour`);
@@ -163,25 +178,32 @@ export class LongTermMemory {
     fact.updatedAt = new Date().toISOString();
 
     // IMPORTANT: Recalculer le vecteur car le contenu a changé
-    const vector = await this.generateEmbedding(ollama, fact);
+    const vector = await this.generateEmbedding(ollama, model, fact);
     this.vectorCache.set(id, vector);
 
     console.log(`✅ Fait mis à jour: ${subject} ${predicate} ${objects.join(', ')}`);
 
-    await this.saveToFile();
+    this.scheduleSave();
     return fact;
   }
 
   async delete(id: string): Promise<boolean> {
     const existed = this.facts.delete(id);
-    this.vectorCache.delete(id); // Nettoyage du cache
+    this.vectorCache.delete(id);
 
     if (existed) {
-      await this.saveToFile();
+      this.scheduleSave();
       console.log('🗑️ Fait supprimé:', id);
     }
 
     return existed;
+  }
+
+  async clearAll(): Promise<void> {
+    this.facts.clear();
+    this.vectorCache.clear();
+    await this.saveToFile();
+    console.log('🗑️ Mémoire vidée');
   }
 
   async getAll(): Promise<Fact[]> {
