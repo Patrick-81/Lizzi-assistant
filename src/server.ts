@@ -8,6 +8,7 @@ import { Assistant } from './core/assistant.js';
 import { VoiceService } from './core/voice.js';
 import { SpeechRecognition } from './core/speech.js';
 import { SystemMonitor } from './core/system-monitor.js';
+import { LocalCalendarClient } from './core/local-calendar.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -44,6 +45,7 @@ setInterval(() => {
 async function getDefaultAssistant(): Promise<Assistant> {
   if (!assistants.has('default')) {
     const assistant = new Assistant();
+    assistant.setCalendarClient(sharedCalendar);
     await assistant.initialize();
     assistants.set('default', assistant);
     sessionActivity.set('default', Date.now());
@@ -54,6 +56,10 @@ async function getDefaultAssistant(): Promise<Assistant> {
 // Instance unique du service vocal
 const voiceService = new VoiceService();
 voiceService.initialize();
+
+// Calendar client partagé — toutes les routes et tous les assistants l'utilisent
+const sharedCalendar = new LocalCalendarClient();
+await sharedCalendar.initialize();
 
 const speechRecognition = new SpeechRecognition();
 await speechRecognition.initialize();
@@ -66,6 +72,22 @@ let transcribeCount = 0;
 // Route principale - sert le frontend
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
+});
+
+// API - Salutation de début de session
+app.get('/api/greet', async (req, res) => {
+  const sessionId = (req.query.sessionId as string) || 'default';
+  if (!assistants.has(sessionId)) {
+    const newAssistant = new Assistant();
+    newAssistant.setCalendarClient(sharedCalendar);
+    await newAssistant.initialize();
+    assistants.set(sessionId, newAssistant);
+  }
+  sessionActivity.set(sessionId, Date.now());
+
+  const assistant = assistants.get(sessionId)!;
+  const greeting = await assistant.greet();
+  res.json({ greeting, sessionId });
 });
 
 // API - Chat en streaming SSE
@@ -87,6 +109,7 @@ app.post('/api/chat/stream', async (req, res) => {
 
   if (!assistants.has(sessionId)) {
     const newAssistant = new Assistant();
+    newAssistant.setCalendarClient(sharedCalendar);
     await newAssistant.initialize();
     assistants.set(sessionId, newAssistant);
   }
@@ -129,6 +152,7 @@ app.post('/api/chat', async (req, res) => {
     // Récupère ou crée l'assistant pour cette session
     if (!assistants.has(sessionId)) {
       const newAssistant = new Assistant();
+      newAssistant.setCalendarClient(sharedCalendar);
       await newAssistant.initialize();
       assistants.set(sessionId, newAssistant);
     }
@@ -180,7 +204,9 @@ app.get('/api/health', (req, res) => {
 // API - Gestion des faits (mémoire long terme)
 app.get('/api/facts', async (req, res) => {
   try {
-    const assistant = assistants.get('default') || new Assistant();
+    const assistant = assistants.get('default') || (() => {
+      const a = new Assistant(); a.setCalendarClient(sharedCalendar); return a;
+    })();
     if (!assistants.has('default')) {
       await assistant.initialize();
       assistants.set('default', assistant);
@@ -368,23 +394,63 @@ app.get('/api/calendar/status', async (req, res) => {
   });
 });
 
-// Événements d'un mois donné (pour la vue calendrier)
+// ── API Agenda REST CRUD ──────────────────────────────────────────────────────
+
+// GET — FullCalendar envoie ?start=ISO&end=ISO, sinon year/month
 app.get('/api/calendar/events', async (req, res) => {
   try {
-    const assistant = await getDefaultAssistant();
-    const client = assistant.getCalendarClient();
-    if (!client.isReady()) {
-      return res.json({ connected: false, events: [], year: 0, month: 0 });
+    let timeMin: string | undefined;
+    let timeMax: string | undefined;
+    if (req.query.start && req.query.end) {
+      timeMin = req.query.start as string;
+      timeMax = req.query.end as string;
+    } else {
+      const year = parseInt(req.query.year as string) || new Date().getFullYear();
+      const month = parseInt(req.query.month as string) || new Date().getMonth() + 1;
+      timeMin = new Date(year, month - 1, 1).toISOString();
+      timeMax = new Date(year, month, 1).toISOString();
     }
-    const year = parseInt(req.query.year as string) || new Date().getFullYear();
-    const month = parseInt(req.query.month as string) || new Date().getMonth() + 1;
-    const timeMin = new Date(year, month - 1, 1).toISOString();
-    const timeMax = new Date(year, month, 1).toISOString();
-    const result = await client.getEvents(100, timeMin, timeMax);
-    res.json({ connected: true, events: result.events, year, month });
+    const result = await sharedCalendar.getEvents(500, timeMin, timeMax);
+    res.json({ connected: true, events: result.events });
   } catch (error: any) {
-    console.error('Erreur calendar events:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// POST — créer un événement
+app.post('/api/calendar/events', async (req, res) => {
+  try {
+    const { summary, start, end, description, location } = req.body;
+    if (!summary || !start) return res.status(400).json({ error: 'summary et start requis' });
+    const endTime = end || (() => {
+      const d = new Date(start); d.setHours(d.getHours() + 1);
+      return d.toISOString().slice(0, 19);
+    })();
+    const result = await sharedCalendar.createEvent(summary, start, endTime, description, location);
+    res.json({ event: result.event });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PATCH — modifier un événement
+app.patch('/api/calendar/events/:id', async (req, res) => {
+  try {
+    const { summary, start, end, description, location } = req.body;
+    const result = await sharedCalendar.updateEvent(req.params.id, { summary, start, end, description, location });
+    res.json({ event: result.event });
+  } catch (error: any) {
+    res.status(404).json({ error: error.message });
+  }
+});
+
+// DELETE — supprimer un événement
+app.delete('/api/calendar/events/:id', async (req, res) => {
+  try {
+    await sharedCalendar.deleteEvent(req.params.id);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(404).json({ error: error.message });
   }
 });
 

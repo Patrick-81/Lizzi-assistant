@@ -7,7 +7,7 @@ import { LongTermMemory, Fact } from './long-term-memory.js';
 import { MemoryDetector } from './memory-detector.js';
 import { SemanticExtractor } from './semantic-extractor.js';
 import { ToolSystem } from './tools.js';
-import { LocalCalendarClient, LocalEvent } from './local-calendar.js';
+import { LocalCalendarClient } from './local-calendar.js';
 
 export type StreamEvent =
   | { type: 'thinking' }
@@ -29,13 +29,14 @@ export class Assistant {
   private model: string;
   private embeddingModel: string;
   private hasAskedName: boolean = false;
-  private pendingDeletion: { event: LocalEvent } | null = null;
+  private isFirstMessage: boolean = true;
 
   private readonly CTX_SIZE = parseInt(process.env.CTX_SIZE || '4096');
   private readonly MAX_TOKENS = 1500;
-  // Estimation : ~4 caractères par token (approximation)
+  // Estimation : ~2 chars/token pour du texte français avec markup et JSON
+  // (les modèles récents tokenisent plus finement que l'estimation naïve à 4 chars/token)
   private estimateTokens(text: string): number {
-    return Math.ceil(text.length / 4);
+    return Math.ceil(text.length / 2);
   }
 
   constructor() {
@@ -60,6 +61,11 @@ export class Assistant {
     this.localCalendar = new LocalCalendarClient();
   }
 
+  /** Injecte un calendar client partagé (évite les instances multiples avec caches divergents) */
+  setCalendarClient(client: LocalCalendarClient) {
+    this.localCalendar = client;
+  }
+
   async initialize() {
     await this.longTermMemory.initialize(this.embeddingClient, this.embeddingModel);
     this.toolSystem.setMemoryContext({
@@ -67,8 +73,19 @@ export class Assistant {
       embeddingClient: this.embeddingClient,
       embeddingModel: this.embeddingModel
     });
-    await this.localCalendar.initialize();
-    this.toolSystem.setCalendarContext(this.localCalendar);
+
+    // Fonction d'embedding partagée avec le calendrier
+    const embeddingFn = async (text: string): Promise<number[]> => {
+      try {
+        const res = await this.embeddingClient.embeddings({ model: this.embeddingModel, prompt: text });
+        return res.embedding;
+      } catch { return []; }
+    };
+
+    // N'initialise le calendar que s'il n'a pas déjà été injecté/chargé
+    if (!this.localCalendar.isReady()) await this.localCalendar.initialize();
+    this.localCalendar.setEmbeddingFn(embeddingFn);
+    this.toolSystem.setCalendarContext(this.localCalendar, embeddingFn);
   }
 
   getCalendarClient(): LocalCalendarClient {
@@ -84,6 +101,22 @@ export class Assistant {
     return nameFact?.objects[0] || null;
   }
 
+  private toolFollowUpInstruction(toolName: string, toolResult: any): string {
+    const hasFormatted = typeof toolResult?.formatted === 'string' && toolResult.formatted.trim().length > 0;
+    if (hasFormatted) {
+      // Si la liste d'événements contient des IDs, les fournir comme référence interne (sans les afficher à l'utilisateur)
+      let idMapping = '';
+      if (Array.isArray(toolResult.events) && toolResult.events.length > 0 && toolResult.events[0]?.id) {
+        const lines = toolResult.events.map((ev: any, i: number) =>
+          `  ${i + 1}. id="${ev.id}" — ${ev.summary}`
+        ).join('\n');
+        idMapping = `\n\n[Référence interne — IDs à utiliser pour delete/update, NE PAS afficher à l'utilisateur]\n${lines}`;
+      }
+      return `Résultat de l'outil ${toolName} :\n${toolResult.formatted}${idMapping}\n\nSi tu dois appeler un autre outil, génère le JSON. Sinon, présente ce contenu à l'utilisateur en Markdown (liste, titres, etc.) sans le résumer ni le tronquer — affiche TOUT le contenu. N'affiche jamais les UUIDs.`;
+    }
+    return `Résultat de l'outil ${toolName} : ${JSON.stringify(toolResult, null, 2)}\n\nSi tu dois appeler un autre outil, génère le JSON. Sinon, formule une réponse naturelle TRÈS COURTE (2 phrases max).`;
+  }
+
   private detectToolCall(text: string): { tool: string; params: any } | null {
     const jsonMatch = text.match(/```json\s*(\{[\s\S]*?\})\s*```/);
     if (!jsonMatch) {
@@ -94,78 +127,12 @@ export class Assistant {
     try { return JSON.parse(jsonMatch[1]); } catch { return null; }
   }
 
-  /** Détecte si le message demande de créer un événement dans l'agenda */
-  private isCalendarCreateIntent(text: string): boolean {
-    const hasDate = /\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/.test(text) || /\bdemain\b/i.test(text);
-    const hasTime = /\bà \d{1,2}h\d{0,2}\b/i.test(text) || /\b\d{2}:\d{2}\b/.test(text);
-    const hasCalendarAction = /\bagenda\b|\bcalendrier\b/i.test(text) &&
-      /\bnote|enregistre|ajoute|inscris|mets|crée|planifie\b/i.test(text);
-    return hasCalendarAction && (hasDate || hasTime);
-  }
-
-  /** Détecte si le message demande d'afficher l'agenda */
   private isCalendarShowIntent(text: string): boolean {
     return /\b(montre|affiche|montre-moi|affiche-moi|voir|consulte?r?|présente)\b.{0,30}\b(agenda|calendrier)\b/i.test(text) ||
       /\b(agenda|calendrier)\b.{0,30}\b(f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[eé]cembre|janvier)\b/i.test(text) ||
       /\bqu'est-ce que j'ai (pr[eé]vu|planifi[eé])\b/i.test(text);
   }
 
-  /** Extrait les détails d'un événement depuis le texte */
-  private parseEventFromText(text: string): { summary: string; start: string; end: string } | null {
-    const MONTHS: Record<string, number> = {
-      janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, mai: 5,
-      juin: 6, juillet: 7, août: 8, aout: 8, septembre: 9,
-      octobre: 10, novembre: 11, décembre: 12, decembre: 12
-    };
-
-    let year: number | null = null, month: number | null = null, day: number | null = null;
-    let hours = 12, minutes = 0;
-
-    // Date JJ/MM/AAAA ou JJ-MM-AAAA
-    const dmy = text.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b/);
-    if (dmy) { day = parseInt(dmy[1]); month = parseInt(dmy[2]); year = parseInt(dmy[3]); }
-
-    // "demain"
-    if (!day && /\bdemain\b/i.test(text)) {
-      const d = new Date(); d.setDate(d.getDate() + 1);
-      day = d.getDate(); month = d.getMonth() + 1; year = d.getFullYear();
-    }
-
-    // Heure "à 12h00" ou "12:00"
-    const hm = text.match(/\bà (\d{1,2})h(\d{0,2})\b/i) || text.match(/\b(\d{2}):(\d{2})\b/);
-    if (hm) { hours = parseInt(hm[1]); minutes = parseInt(hm[2] || '0'); }
-
-    if (!day || !month || !year) return null;
-
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const start = `${year}-${pad(month)}-${pad(day)}T${pad(hours)}:${pad(minutes)}:00`;
-
-    // Fin = début + 1h
-    const endDate = new Date(start);
-    endDate.setHours(endDate.getHours() + 1);
-    const end = endDate.toISOString().slice(0, 19);
-
-    // Titre : texte après ":" ou après le pattern date/heure, sinon tout le message
-    let summary = text;
-    const afterColon = text.match(/:\s*(.+)$/);
-    if (afterColon) {
-      summary = afterColon[1].trim();
-    } else {
-      // Retire les mots-clés d'action et les éléments date/heure
-      summary = text
-        .replace(/^(note|enregistre|ajoute|inscris|mets|crée|planifie)\s+(dans\s+mon\s+agenda|dans\s+mon\s+calendrier)?\s*/i, '')
-        .replace(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}\b/, '')
-        .replace(/\bdemain\b/i, '')
-        .replace(/\bà \d{1,2}h\d{0,2}\b/i, '')
-        .replace(/\b\d{2}:\d{2}\b/, '')
-        .replace(/^\s*[:\-,]\s*/, '')
-        .trim();
-    }
-
-    return summary.length > 0 ? { summary, start, end } : null;
-  }
-
-  /** Extrait le mois demandé dans une phrase "agenda de mars", "calendrier de février", etc. */
   private parseMonthFromText(text: string): { year: number; month: number } {
     const MONTHS: Record<string, number> = {
       janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, mai: 5,
@@ -184,80 +151,12 @@ export class Assistant {
     return { year: now.getFullYear(), month: now.getMonth() + 1 };
   }
 
-  /** Détecte si le message demande de supprimer un événement */
-  private isCalendarDeleteIntent(text: string): boolean {
-    return /\b(supprime|annule|efface|retire|enlève|enleve|supprimer|annuler|effacer)\b/i.test(text) &&
-      /\bagenda\b|\bcalendrier\b|\bévenement\b|\bevenement\b|\brendez-vous\b|\brdv\b|\brepas\b|\bréunion\b|\breunion\b|\brappel\b|le \d|du \d|l'event|l'événement/i.test(text);
-  }
 
-  /** Extrait les mots-clés de recherche pour trouver l'événement à supprimer */
-  private extractDeleteKeywords(text: string): string {
-    return text
-      .replace(/\b(supprime|annule|efface|retire|enlève|enleve|supprimer|annuler|effacer)\b/gi, '')
-      .replace(/\b(dans mon agenda|de mon agenda|dans l'agenda|de l'agenda|dans le calendrier)\b/gi, '')
-      .replace(/\b(l'événement|l'evenement|le rendez-vous|le rdv|le repas|la réunion|mon|mes|cet|cette)\b/gi, '')
-      .replace(/\b(s'il te plait|stp|svp)\b/gi, '')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
-  }
-
-  /** Cherche un événement dans le calendrier local et prépare la suppression avec confirmation */
-  private async deleteCalendarEvent(userMessage: string): Promise<string> {
-    const keywords = this.extractDeleteKeywords(userMessage);
-
-    const searchResult = await this.localCalendar.searchEvents(keywords, 20);
-    let candidates = searchResult.events as any[];
-
-    // Affinage par jour si présent dans le message
-    const dmy = userMessage.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b/);
-    const dayMatch = userMessage.match(/\ble (\d{1,2})\b/i);
-    const dateDay = dmy ? parseInt(dmy[1]) : (dayMatch ? parseInt(dayMatch[1]) : null);
-    if (dateDay && candidates.length > 1) {
-      const byDate = candidates.filter(ev => {
-        const d = new Date(ev.start.dateTime || ev.start.date || 0);
-        return d.getDate() === dateDay;
-      });
-      if (byDate.length > 0) candidates = byDate;
-    }
-
-    if (candidates.length === 0) {
-      // Dernière chance : match partiel mot par mot
-      const allResult = await this.localCalendar.searchEvents('', 100);
-      const kwLower = keywords.toLowerCase();
-      candidates = (allResult.events as any[]).filter(ev =>
-        kwLower.split(' ').some(w => w.length > 3 && ev.summary.toLowerCase().includes(w))
-      );
-    }
-
-    if (candidates.length === 0) {
-      return `Je n'ai trouvé aucun événement correspondant à "${keywords}" dans ton agenda. 🔍`;
-    }
-
-    if (candidates.length === 1) {
-      const ev = candidates[0];
-      const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
-      const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
-      const timeStr = ev.start.dateTime
-        ? ` à ${d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`
-        : '';
-      this.pendingDeletion = { event: ev };
-      return `Tu veux supprimer "${ev.summary}" du ${dateStr}${timeStr} ? (oui / non)`;
-    }
-
-    // Plusieurs candidats → lister
-    const list = candidates.slice(0, 5).map((ev: any, i: number) => {
-      const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
-      const dateStr = d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
-      return `${i + 1}. ${ev.summary} — ${dateStr}`;
-    }).join('\n');
-    return `J'ai trouvé ${candidates.length} événements correspondants, lequel veux-tu supprimer ?\n${list}`;
-  }
 
   /**
    * Élargit la requête pour améliorer la recherche vectorielle
    */
   private expandQuery(query: string): string {
-    const lowerQuery = query.toLowerCase();
 
     // Questions sur le nombre d'animaux
     if (/combien|nombre|quantité/i.test(query) && /animaux|animal/i.test(query)) {
@@ -280,6 +179,17 @@ export class Assistant {
     return query;
   }
 
+  /** Retourne une salutation de bienvenue pour le début de session. */
+  async greet(): Promise<string> {
+    const userName = await this.getUserName();
+    if (userName) {
+      return `Bonjour ${userName} ! 😊 Comment puis-je t'aider ?`;
+    }
+    // Si le nom est inconnu, on marque qu'on a déjà posé la question
+    this.hasAskedName = true;
+    return "Bonjour ! 😊 Avant que nous fassions plus ample connaissance, comment t'appelles-tu ?";
+  }
+
   async chat(userMessage: string): Promise<{ message: string; tokenInfo?: string; calendarAction?: { year: number; month: number } }> {
     const startTime = Date.now();
     const userName = await this.getUserName();
@@ -300,49 +210,6 @@ export class Assistant {
       await this.longTermMemory.add("s'appelle", extractedName, "Utilisateur");
       this.hasAskedName = false;
       return { message: `Enchanté ${extractedName} ! Je prends note. Comment puis-je t'aider ?` };
-    }
-
-    // 2b. CONFIRMATION DE SUPPRESSION en attente
-    if (this.pendingDeletion) {
-      const ev = this.pendingDeletion.event;
-      const lower = userMessage.toLowerCase().trim();
-      const isYes = /^(oui|yes|ok|yep|ouais|confirme|vas-y|go|sup|supprime|c'est ça|exact)/.test(lower);
-      const isNo  = /^(non|no|nope|annule|laisse|stop|ne supprime pas|garde)/.test(lower);
-
-      this.pendingDeletion = null;
-
-      if (isYes) {
-        try {
-          await this.localCalendar.deleteEvent(ev.id);
-          const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
-          const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
-          const msg = `✅ "${ev.summary}" du ${dateStr} supprimé.`;
-          this.memory.addMessage('user', userMessage);
-          this.memory.addMessage('assistant', msg);
-          return { message: msg };
-        } catch (e: any) {
-          const msg = `❌ Erreur lors de la suppression : ${e.message}`;
-          this.memory.addMessage('user', userMessage);
-          this.memory.addMessage('assistant', msg);
-          return { message: msg };
-        }
-      }
-
-      if (isNo) {
-        const msg = `D'accord, je ne supprime rien. 👍`;
-        this.memory.addMessage('user', userMessage);
-        this.memory.addMessage('assistant', msg);
-        return { message: msg };
-      }
-
-      // Réponse ambiguë → on repose la question
-      const d = new Date(ev.start.dateTime ?? ev.start.date ?? 0);
-      const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
-      this.pendingDeletion = { event: ev }; // remet en attente
-      const msg = `Je n'ai pas compris. Tu veux supprimer "${ev.summary}" du ${dateStr} ? (oui / non)`;
-      this.memory.addMessage('user', userMessage);
-      this.memory.addMessage('assistant', msg);
-      return { message: msg };
     }
 
     // 3. MÉMORISATION : Vérifie si l'utilisateur demande d'enregistrer quelque chose
@@ -392,8 +259,11 @@ export class Assistant {
           console.log('⏭️ Fait déjà existant, pas de modification');
         }
 
-        // Confirmation à l'utilisateur
-        return { message: `C'est noté ! Je me souviendrai que ${triple.subject} ${triple.predicate} ${triple.object}.` };
+        // Confirmation à l'utilisateur (on évite "Patrick s'appelle Patrick" en utilisant "tu")
+        const subjectDisplay = triple.subject === userName || triple.subject === 'Utilisateur'
+          ? 'tu'
+          : triple.subject;
+        return { message: `C'est noté ! Je me souviendrai que ${subjectDisplay} ${triple.predicate} ${triple.object}.` };
       } else {
         console.log('⚠️ Impossible d\'extraire un triplet valide');
       }
@@ -401,39 +271,12 @@ export class Assistant {
       console.log('⭕ Pas de mot-clé de mémorisation détecté');
     }
 
-    // 4. AGENDA — Création d'événement détectée directement (sans passer par le LLM)
-    if (this.isCalendarCreateIntent(userMessage)) {
-      console.log('📅 Intention création agenda détectée');
-      const event = this.parseEventFromText(userMessage);
-      if (event) {
-        try {
-          const result = await this.toolSystem.executeTool('calendar', {
-            operation: 'create_event',
-            summary: event.summary,
-            start: event.start,
-            end: event.end
-          });
-          const startDate = new Date(event.start);
-          const dateStr = startDate.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
-          const timeStr = startDate.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-          const msg = `✅ Noté dans ton agenda ! "${event.summary}" le ${dateStr} à ${timeStr}.`;
-          this.memory.addMessage('user', userMessage);
-          this.memory.addMessage('assistant', msg);
-          return { message: msg };
-        } catch (e: any) {
-          console.error('❌ Erreur création événement:', e.message);
-        }
-      }
-    }
-
-    // 5. AGENDA — Affichage détecté directement
+    // 5. AGENDA — Affichage du widget calendrier (action UI pure)
     if (this.isCalendarShowIntent(userMessage)) {
       console.log('📅 Intention affichage agenda détectée');
       const { year, month } = this.parseMonthFromText(userMessage);
       try {
-        const result = await this.toolSystem.executeTool('calendar', {
-          operation: 'show_calendar', year, month
-        });
+        const result = await this.toolSystem.executeTool('show_calendar', { year, month });
         const monthName = new Date(year, month - 1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
         const evCount = (result.count as number) || 0;
         const msg = evCount === 0
@@ -441,26 +284,17 @@ export class Assistant {
           : `Voici ton agenda de ${monthName} — ${evCount} événement(s). 📅\n${result.formatted}`;
         this.memory.addMessage('user', userMessage);
         this.memory.addMessage('assistant', msg);
-        return { message: msg, calendarAction: { year, month } };
+        // On retourne une version concise pour l'affichage (le détail est en mémoire)
+        const displayMsg = evCount === 0
+          ? msg
+          : `Voici ton agenda de ${monthName} — ${evCount} événement(s). 📅`;
+        return { message: displayMsg, calendarAction: { year, month } };
       } catch (e: any) {
         console.error('❌ Erreur affichage agenda:', e.message);
       }
     }
 
-    // 6. AGENDA — Suppression d'événement détectée directement
-    if (this.isCalendarDeleteIntent(userMessage)) {
-      console.log('📅 Intention suppression agenda détectée');
-      try {
-        const msg = await this.deleteCalendarEvent(userMessage);
-        this.memory.addMessage('user', userMessage);
-        this.memory.addMessage('assistant', msg);
-        return { message: msg };
-      } catch (e: any) {
-        console.error('❌ Erreur suppression événement:', e.message);
-      }
-    }
-
-    // 7. CONTEXTE LLM + APPEL LLM (factorisé)
+    // 5. CONTEXTE LLM + APPEL LLM (toutes les opérations agenda gérées par le LLM via tools)
     const ctx = await this.buildLLMContext(userMessage, userName);
     if ('saturation' in ctx) return { message: ctx.saturation };
 
@@ -471,36 +305,47 @@ export class Assistant {
       options: {
         temperature: 0.3,
         max_tokens: ctx.effectiveMaxTokens,
-        stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant']
+        stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant', '<|im_end|>', '<|im_start|>', '<|eot_id|>', '[INST]']
       }
     });
     console.log(`⏱️  Génération LLM en ${Date.now() - t3}ms`);
 
     let assistantMessage = this.cleanLLMResponse(response.message.content);
+    console.log(`🤖 Réponse LLM brute: "${assistantMessage.slice(0, 200)}"`);
 
-    // 8. Gestion des outils
+    // 6. Boucle d'outils (jusqu'à 8 tours : ex. agenda_list → agenda_delete multiple)
     let calendarAction: { year: number; month: number } | undefined;
-    const toolCall = this.detectToolCall(assistantMessage);
-    if (toolCall && toolCall.tool) {
+    let toolMessages = [...ctx.allMessages];
+    let loopCount = 0;
+
+    while (loopCount < 8) {
+      const toolCall = this.detectToolCall(assistantMessage);
+      if (!toolCall?.tool) break;
+
+      console.log(`🔧 Outil détecté: ${toolCall.tool}`, JSON.stringify(toolCall.params));
       const toolResult = await this.toolSystem.executeTool(toolCall.tool, toolCall.params);
-      if (toolResult.showCalendar) {
-        calendarAction = toolResult.showCalendar;
-      }
+      console.log(`✅ Résultat outil ${toolCall.tool}:`, JSON.stringify(toolResult).slice(0, 200));
+
+      if (toolResult.showCalendar) calendarAction = toolResult.showCalendar;
+
+      toolMessages = [
+        ...toolMessages,
+        { role: 'assistant', content: assistantMessage },
+        { role: 'user', content: this.toolFollowUpInstruction(toolCall.tool, toolResult) }
+      ];
+
       const followUp = await this.llm.chat({
         model: this.model,
-        messages: [
-          ...this.memory.getMessages(),
-          { role: 'assistant', content: assistantMessage },
-          {
-            role: 'user',
-            content: `Résultat de l'outil ${toolCall.tool} : ${JSON.stringify(toolResult, null, 2)}\n\nFormule une réponse naturelle TRÈS COURTE (2 phrases max) avec ce résultat.`
-          }
-        ],
-        options: { temperature: 0.3 }
+        messages: toolMessages,
+        options: { temperature: 0.3, stop: ['<|im_end|>', '<|im_start|>', '<|eot_id|>', '[INST]', '###User', '###Assistant'] }
       });
       assistantMessage = this.cleanLLMResponse(followUp.message.content);
+      console.log(`🤖 Follow-up [${loopCount + 1}]: "${assistantMessage.slice(0, 200)}"`);
+
+      loopCount++;
     }
 
+    const displayMessage = assistantMessage;
     this.memory.addMessage('assistant', assistantMessage);
 
     // Statistiques tokens (retournées séparément, pas dans le texte vocal)
@@ -508,7 +353,7 @@ export class Assistant {
     const tokenInfo = `~${ctx.promptTokens} tokens prompt · ~${responseTokens} tokens réponse · ${this.CTX_SIZE - ctx.promptTokens - responseTokens} restants`;
 
     console.log(`⏱️  TEMPS TOTAL: ${Date.now() - startTime}ms`);
-    return { message: assistantMessage, tokenInfo, calendarAction };
+    return { message: displayMessage, tokenInfo, calendarAction };
   }
 
   // --- MÉTHODES PRIVÉES : PRÉPARATION DU CONTEXTE LLM ---
@@ -584,6 +429,9 @@ export class Assistant {
 
     const now = new Date();
     const dateContext = `\n\n### DATE ET HEURE ACTUELLES\nAujourd'hui : ${now.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} — ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}.\nUtilise toujours cette date comme référence.`;
+
+    // Injection du contexte agenda supprimée : le LLM appelle agenda_list/agenda_search lui-même via les outils
+
     const systemContent = SYSTEM_PROMPT + dateContext + memoryContext + '\n\n' + this.toolSystem.getToolDescriptions();
     const allMessages = [{ role: 'system', content: systemContent }, ...this.memory.getMessages()];
 
@@ -591,12 +439,12 @@ export class Assistant {
     const available = this.CTX_SIZE - promptTokens;
     console.log(`📊 Tokens estimés — prompt: ~${promptTokens}, disponibles pour réponse: ~${available}`);
 
-    if (available < 100) {
+    if (available < 400) {
       const warning = `⚠️ Le contexte est saturé (~${promptTokens} tokens utilisés sur ${this.CTX_SIZE}). Je ne peux pas répondre correctement. Essaie de vider l'historique ou de poser une question plus courte.`;
       this.memory.addMessage('assistant', warning);
       return { saturation: warning };
     }
-    if (available < 400) console.warn(`⚠️ Peu de tokens disponibles pour la réponse (~${available})`);
+    if (available < 800) console.warn(`⚠️ Peu de tokens disponibles pour la réponse (~${available})`);
 
     const effectiveMaxTokens = Math.min(this.MAX_TOKENS, available - 50);
     return { allMessages, effectiveMaxTokens, promptTokens };
@@ -608,6 +456,11 @@ export class Assistant {
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/\[THINK\][\s\S]*?\[\/THINK\]/gi, '')
       .replace(/\[THINKING\][\s\S]*?\[\/THINKING\]/gi, '')
+      // Tokens de format de chat qui fuient dans la réponse (Mistral/Qwen/ChatML)
+      .split(/<\|im_end\|>/i)[0]
+      .split(/<\|im_start\|>/i)[0]
+      .split(/<\|eot_id\|>/i)[0]
+      .replace(/\[INST\][\s\S]*?\[\/INST\]/gi, '')
       .replace(/###\s*(Assistant|User|System|Utilisateur|LIZZI):?/gi, '')
       .replace(/^(Assistant|Lizzi|Réponse)[\s:]+/gi, '')
       .replace(/\n{3,}/g, '\n\n')
@@ -622,15 +475,12 @@ export class Assistant {
     const startTime = Date.now();
     const userName = await this.getUserName();
 
-    // Pour tous les cas spéciaux (gestion du nom, mémoire explicite, agenda direct),
+    // Pour tous les cas spéciaux (gestion du nom, mémoire explicite, affichage agenda),
     // on délègue à chat() car ces chemins sont rapides (<500ms) et peu fréquents.
     const isSpecialCase =
       !userName ||
-      this.pendingDeletion !== null ||
       this.memoryDetector.detect(userMessage) ||
-      this.isCalendarCreateIntent(userMessage) ||
-      this.isCalendarShowIntent(userMessage) ||
-      this.isCalendarDeleteIntent(userMessage);
+      this.isCalendarShowIntent(userMessage);
 
     if (isSpecialCase) {
       try {
@@ -663,7 +513,7 @@ export class Assistant {
     for await (const chunk of this.llm.chatStream({
       model: this.model,
       messages: ctx.allMessages,
-      options: { temperature: 0.3, max_tokens: ctx.effectiveMaxTokens, stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant'] }
+      options: { temperature: 0.3, max_tokens: ctx.effectiveMaxTokens, stop: ['###', 'User:', 'Assistant:', '###User', '###Assistant', '<|im_end|>', '<|im_start|>', '<|eot_id|>', '[INST]'] }
     })) {
       buffer += chunk;
 
@@ -695,30 +545,46 @@ export class Assistant {
 
     // Nettoyage post-stream
     let assistantMessage = this.cleanLLMResponse(fullResponse);
+    console.log(`🤖 [STREAM] Réponse LLM brute: "${assistantMessage.slice(0, 200)}"`);
 
-    // Gestion outils (tool call détecté dans la réponse)
+    // Boucle d'outils (jusqu'à 8 tours : ex. agenda_list → agenda_delete multiple)
     let calendarAction: { year: number; month: number } | undefined;
-    const toolCall = this.detectToolCall(assistantMessage);
-    if (toolCall?.tool) {
+    let toolMessages = [...ctx.allMessages];
+    let loopCount = 0;
+
+    while (loopCount < 8) {
+      const toolCall = this.detectToolCall(assistantMessage);
+      if (!toolCall?.tool) break;
+
+      console.log(`🔧 [STREAM] Outil détecté: ${toolCall.tool}`, JSON.stringify(toolCall.params));
       const toolResult = await this.toolSystem.executeTool(toolCall.tool, toolCall.params);
+      console.log(`✅ [STREAM] Résultat ${toolCall.tool}:`, JSON.stringify(toolResult).slice(0, 200));
+
       if (toolResult.showCalendar) calendarAction = toolResult.showCalendar;
+
+      toolMessages = [
+        ...toolMessages,
+        { role: 'assistant', content: assistantMessage },
+        { role: 'user', content: this.toolFollowUpInstruction(toolCall.tool, toolResult) }
+      ];
+
       const followUp = await this.llm.chat({
         model: this.model,
-        messages: [
-          ...this.memory.getMessages(),
-          { role: 'assistant', content: assistantMessage },
-          { role: 'user', content: `Résultat de l'outil ${toolCall.tool} : ${JSON.stringify(toolResult, null, 2)}\n\nFormule une réponse naturelle TRÈS COURTE (2 phrases max) avec ce résultat.` }
-        ],
-        options: { temperature: 0.3 }
+        messages: toolMessages,
+        options: { temperature: 0.3, stop: ['<|im_end|>', '<|im_start|>', '<|eot_id|>', '[INST]', '###User', '###Assistant'] }
       });
       assistantMessage = this.cleanLLMResponse(followUp.message.content);
+      console.log(`🤖 [STREAM] Follow-up [${loopCount + 1}]: "${assistantMessage.slice(0, 200)}"`);
+
+      loopCount++;
     }
 
+    const displayMessage = assistantMessage;
     this.memory.addMessage('assistant', assistantMessage);
     const responseTokens = this.estimateTokens(assistantMessage);
     const tokenInfo = `~${ctx.promptTokens} tokens prompt · ~${responseTokens} tokens réponse · ${this.CTX_SIZE - ctx.promptTokens - responseTokens} restants`;
     console.log(`⏱️  STREAM TOTAL: ${Date.now() - startTime}ms`);
-    yield { type: 'done', message: assistantMessage, tokenInfo, calendarAction };
+    yield { type: 'done', message: displayMessage, tokenInfo, calendarAction };
   }
 
   // --- MÉTHODES API POUR SERVER.TS ---

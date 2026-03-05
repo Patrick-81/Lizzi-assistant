@@ -15,15 +15,15 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a; source "$SCRIPT_DIR/.env"; set +a
 fi
 
-# Chemins (MODELS_DIR peut être surchargé via .env)
-MODEL_DIR="${MODELS_DIR:-$HOME/.var/app/llama-server/models}"
-CHAT_MODEL="$MODEL_DIR/${MODEL_NAME:-Ministral-3-8B-Reasoning-2512-Q4_K_M.gguf}"
-EMBED_MODEL="$MODEL_DIR/${EMBEDDING_MODEL:-jina-embeddings-v2-small-en-Q5_K_M.gguf}"
+# Chemins — tout vient du .env
+MODEL_DIR="${MODELS_DIR}"
+CHAT_MODEL="$MODEL_DIR/$MODEL_NAME"
+EMBED_MODEL="$MODEL_DIR/$EMBEDDING_MODEL"
 
-# Ports
-CHAT_PORT=11434
-EMBED_PORT=11435
-APP_PORT=3001
+# Ports extraits des URLs du .env
+CHAT_PORT=$(echo "$LLM_HOST" | sed 's/.*://')
+EMBED_PORT=$(echo "$EMBEDDING_HOST" | sed 's/.*://')
+APP_PORT="${PORT}"
 
 # PIDs pour cleanup
 CHAT_PID=""
@@ -75,13 +75,13 @@ lsof -ti :$APP_PORT | xargs kill -9 2>/dev/null || true
 sleep 2
 
 # Lancement serveur CHAT
-echo -e "${GREEN}🚀 Démarrage serveur chat (port $CHAT_PORT)...${NC}"
+echo -e "${GREEN}🚀 Démarrage serveur chat $MODEL_NAME  (port $CHAT_PORT)...${NC}"
 llama-server \
   --model "$CHAT_MODEL" \
   --host 0.0.0.0 \
   --port $CHAT_PORT \
-  --ctx-size ${CTX_SIZE:-4096} \
-  --n-gpu-layers 35 \
+  --ctx-size $CTX_SIZE \
+  --n-gpu-layers $LLM_GPU_LAYERS \
   > /tmp/llama-chat.log 2>&1 &
 CHAT_PID=$!
 echo "  📝 PID: $CHAT_PID"
@@ -102,9 +102,9 @@ llama-server \
   --host 0.0.0.0 \
   --port $EMBED_PORT \
   --embeddings \
-  --pooling mean \
-  --n-gpu-layers 999 \
-  --ctx-size 512 \
+  --pooling $EMBEDDING_POOLING \
+  --n-gpu-layers $EMBEDDING_GPU_LAYERS \
+  --ctx-size $EMBEDDING_CTX_SIZE \
   > /tmp/llama-embed.log 2>&1 &
 EMBED_PID=$!
 echo "  📝 PID: $EMBED_PID"

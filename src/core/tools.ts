@@ -362,31 +362,51 @@ export class ToolSystem {
 
   getToolDescriptions(): string {
     const tools = Array.from(this.tools.values())
-      .map(t => `- ${t.name}: ${t.description}`)
+      .map(t => `- **${t.name}**: ${t.description}`)
       .join('\n');
     return `\n### OUTILS DISPONIBLES
 ${tools}
 
-### RÈGLE D'UTILISATION DES OUTILS (OBLIGATOIRE)
-Quand l'utilisateur demande quelque chose qui nécessite un outil, tu DOIS répondre UNIQUEMENT avec ce JSON, sans aucun autre texte avant ou après :
+### PROTOCOLE D'APPEL D'OUTIL (OBLIGATOIRE)
+Quand tu dois utiliser un outil, réponds UNIQUEMENT avec ce JSON (rien d'autre) :
 {"tool":"nom_outil","params":{"clé":"valeur",...}}
 
-### QUAND UTILISER QUEL OUTIL
-- AGENDA (rendez-vous, événements, repas, réunions, rappels datés) → outil "calendar"
-- MÉMOIRE (préférences, faits permanents sur l'utilisateur, goûts, infos perso) → outil "manage_memory"
+### GESTION AUTONOME DE L'AGENDA
 
-RÈGLE CRITIQUE : Toute demande contenant une DATE ou une HEURE = outil "calendar", jamais "manage_memory".
+**CONSULTATION** — Pour TOUTE question sur l'agenda : appelle agenda_list EN PREMIER, sans exception.
+Pour une date précise :
+{"tool":"agenda_list","params":{"date_min":"2026-03-19T00:00:00","date_max":"2026-03-19T23:59:59"}}
+Pour un mois entier :
+{"tool":"agenda_list","params":{"date_min":"2026-03-01T00:00:00","date_max":"2026-03-31T23:59:59"}}
 
-Exemples :
-- "enregistre un repas de famille demain à 12h" → {"tool":"calendar","params":{"operation":"create_event","summary":"Repas de famille au restaurant de Técou","start":"2026-02-27T12:00:00","end":"2026-02-27T14:00:00"}}
-- "crée un rendez-vous lundi à 9h" → {"tool":"calendar","params":{"operation":"create_event","summary":"Rendez-vous","start":"2026-03-02T09:00:00","end":"2026-03-02T10:00:00"}}
-- "montre mon agenda" → {"tool":"calendar","params":{"operation":"show_calendar"}}
-- "qu'est-ce que j'ai prévu ce mois-ci ?" → {"tool":"calendar","params":{"operation":"show_calendar"}}
-- "affiche mon calendrier de mars" → {"tool":"calendar","params":{"operation":"show_calendar","month":3}}
-- "liste mes souvenirs" → {"tool":"manage_memory","params":{"operation":"list"}}
+**AJOUT** — si date, heure ou libellé manquant, demande-les. Quand tu as tout :
+{"tool":"agenda_create","params":{"summary":"Rendez-vous médecin","start":"2026-03-05T14:00:00"}}
 
-NE DIS PAS "C'est noté !" ou "Je me souviendrai" pour un événement daté. Crée-le dans l'agenda avec le JSON.
-NE DIS PAS "Un instant !" ou "Je vais chercher...". Réponds directement avec le JSON.`;
+**SUPPRESSION** :
+1. agenda_list pour obtenir les événements et leurs IDs
+2. Présente la liste numérotée : "1. Titre — date heure (id: uuid)"
+3. L'utilisateur indique les numéros ou titres à supprimer
+4. Demande confirmation courte
+5. Après confirmation explicite, supprime TOUT en une seule fois avec event_ids :
+   - Un seul : {"tool":"agenda_delete","params":{"event_id":"uuid-ici"}}
+   - Plusieurs : {"tool":"agenda_delete","params":{"event_ids":["uuid-1","uuid-2","uuid-3"]}}
+
+**MODIFICATION** :
+1. agenda_list pour obtenir l'ID de l'événement
+2. {"tool":"agenda_update","params":{"event_id":"uuid-ici","start":"2026-03-05T15:00:00"}}
+
+**DUPLICATION** — Copier un événement à une autre date EN CONSERVANT le libellé et l'heure :
+1. agenda_list sur la date de l'événement source pour récupérer son summary, start ET end exacts
+2. Calcule la nouvelle date en gardant EXACTEMENT la même heure (HH:MM:SS)
+3. {"tool":"agenda_create","params":{"summary":"<même titre>","start":"<nouvelle_date>T<même_heure>","end":"<nouvelle_date>T<même_heure_fin>"}}
+INTERDIT de créer l'événement sans avoir d'abord appelé agenda_list pour connaître l'heure exacte.
+
+**RÈGLES CRITIQUES :**
+- INTERDIT de répondre à une question sur l'agenda sans avoir appelé un outil
+- JAMAIS appeler agenda_delete sans confirmation explicite de l'utilisateur
+- Si agenda_create retourne { conflict: true } : montre les événements en conflit à l'utilisateur et demande confirmation. Si l'utilisateur confirme, rappelle agenda_create avec "force": true. Ne crée jamais deux événements à la même heure sans confirmation.
+- MÉMOIRE (préférences, faits permanents) → manage_memory, pas agenda_*
+- Toute demande contenant une DATE ou une HEURE → agenda_*, jamais manage_memory`;
   }
 
   setMemoryContext(ctx: MemoryContext) {
@@ -502,135 +522,245 @@ NE DIS PAS "Un instant !" ou "Je vais chercher...". Réponds directement avec le
     });
   }
 
-  setCalendarContext(calendarClient: LocalCalendarClient) {
-    this.tools.set('calendar', {
-      name: 'calendar',
-      description: 'Gère l\'agenda Google Calendar : consulte, crée, modifie et supprime des événements. Opérations : get_events, search_events, create_event, update_event, delete_event, show_calendar (affiche la vue mensuelle).',
+  setCalendarContext(calendarClient: LocalCalendarClient, embeddingFn?: (text: string) => Promise<number[]>) {
+
+    // ── agenda_list ───────────────────────────────────────────────────────────
+    this.tools.set('agenda_list', {
+      name: 'agenda_list',
+      description: 'Liste les événements de l\'agenda dans une plage de dates. Retourne les événements avec leurs IDs.',
       parameters: {
         type: 'object',
         properties: {
-          operation: {
-            type: 'string',
-            enum: ['get_events', 'search_events', 'create_event', 'update_event', 'delete_event', 'show_calendar'],
-            description: 'Opération à effectuer. Utilise show_calendar pour afficher la page agenda du mois.'
-          },
-          year: {
-            type: 'number',
-            description: 'Année (pour show_calendar, défaut: année courante)'
-          },
-          month: {
-            type: 'number',
-            description: 'Mois 1-12 (pour show_calendar, défaut: mois courant)'
-          },
-          max_results: {
-            type: 'number',
-            description: 'Nombre maximum d\'événements à retourner (défaut: 10)'
-          },
-          time_min: {
-            type: 'string',
-            description: 'Date de début ISO 8601 pour filtrer les événements (ex: 2026-02-26T00:00:00+01:00)'
-          },
-          time_max: {
-            type: 'string',
-            description: 'Date de fin ISO 8601 pour filtrer les événements'
-          },
-          query: {
-            type: 'string',
-            description: 'Texte de recherche (pour search_events)'
-          },
-          event_id: {
-            type: 'string',
-            description: 'Identifiant de l\'événement (pour update_event et delete_event)'
-          },
-          summary: {
-            type: 'string',
-            description: 'Titre de l\'événement (pour create_event et update_event)'
-          },
-          start: {
-            type: 'string',
-            description: 'Date/heure de début ISO 8601 (ex: 2026-03-01T14:00:00 pour une heure précise, ou 2026-03-01 pour toute la journée)'
-          },
-          end: {
-            type: 'string',
-            description: 'Date/heure de fin ISO 8601'
-          },
-          description: {
-            type: 'string',
-            description: 'Description de l\'événement (optionnel)'
-          },
-          location: {
-            type: 'string',
-            description: 'Lieu de l\'événement (optionnel)'
-          }
+          date_min: { type: 'string', description: 'Date de début ISO 8601 (ex: 2026-03-01T00:00:00)' },
+          date_max: { type: 'string', description: 'Date de fin ISO 8601 (ex: 2026-03-31T23:59:59)' },
+          max_results: { type: 'number', description: 'Nombre maximum de résultats (défaut: 20)' }
         },
-        required: ['operation']
+        required: []
       },
       execute: async (params) => {
-        if (!calendarClient.isReady()) {
-          return {
-            success: false,
-            error: calendarClient.credentialsExist()
-              ? 'Google Calendar non authentifié. Visite /auth/google pour autoriser l\'accès.'
-              : 'Google Calendar non configuré. Place le fichier credentials.json dans data/.'
-          };
-        }
-
         try {
-          const { operation, max_results, time_min, time_max, query, event_id, summary, start, end, description, location } = params;
-          const year: number = params.year || new Date().getFullYear();
-          const month: number = params.month || (new Date().getMonth() + 1);
-
-          switch (operation) {
-            case 'show_calendar': {
-              const tMin = new Date(year, month - 1, 1).toISOString();
-              const tMax = new Date(year, month, 1).toISOString();
-              const result = await calendarClient.getEvents(100, tMin, tMax);
-              const monthName = new Date(year, month - 1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
-              return {
-                success: true,
-                showCalendar: { year, month },
-                count: result.events.length,
-                formatted: `J'ouvre ton agenda de ${monthName}. Tu y trouveras ${result.events.length} événement(s).`
-              };
-            }
-
-            case 'get_events': {
-              const result = await calendarClient.getEvents(max_results || 10, time_min, time_max);
-              return { success: true, count: result.events.length, formatted: result.formatted };
-            }
-
-            case 'search_events': {
-              if (!query) return { success: false, error: 'Le paramètre "query" est requis pour search_events.' };
-              const result = await calendarClient.searchEvents(query, max_results || 10);
-              return { success: true, count: result.events.length, formatted: result.formatted };
-            }
-
-            case 'create_event': {
-              if (!summary || !start || !end) {
-                return { success: false, error: 'Les paramètres "summary", "start" et "end" sont requis pour create_event.' };
-              }
-              const result = await calendarClient.createEvent(summary, start, end, description, location);
-              return { success: true, formatted: result.formatted };
-            }
-
-            case 'update_event': {
-              if (!event_id) return { success: false, error: 'Le paramètre "event_id" est requis pour update_event.' };
-              const result = await calendarClient.updateEvent(event_id, { summary, start, end, description, location });
-              return { success: true, formatted: result.formatted };
-            }
-
-            case 'delete_event': {
-              if (!event_id) return { success: false, error: 'Le paramètre "event_id" est requis pour delete_event.' };
-              const msg = await calendarClient.deleteEvent(event_id);
-              return { success: true, formatted: msg };
-            }
-
-            default:
-              return { success: false, error: `Opération "${operation}" non reconnue.` };
-          }
-        } catch (error: any) {
-          return { success: false, error: `Erreur Calendar : ${error.message}` };
+          const result = await calendarClient.getEvents(params.max_results || 20, params.date_min, params.date_max);
+          const events = result.events.map((ev: any) => ({
+            id: ev.id,
+            summary: ev.summary,
+            start: ev.start.dateTime || ev.start.date,
+            end: ev.end.dateTime || ev.end.date,
+            location: ev.location,
+            description: ev.description
+          }));
+          return { success: true, count: events.length, events, formatted: result.formatted };
+        } catch (e: any) {
+          return { success: false, error: e.message };
         }
+      }
+    });
+
+    // ── agenda_search ─────────────────────────────────────────────────────────
+    this.tools.set('agenda_search', {
+      name: 'agenda_search',
+      description: 'Recherche sémantique dans l\'agenda par texte libre. Utilise la similarité vectorielle pour trouver les événements même avec des synonymes. Retourne les événements avec leurs IDs. À utiliser AVANT agenda_delete ou agenda_update pour trouver l\'event_id.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Texte de recherche libre (ex: "médecin", "réunion équipe", "repas famille")' },
+          date_min: { type: 'string', description: 'Filtrer après cette date ISO 8601 (optionnel)' },
+          date_max: { type: 'string', description: 'Filtrer avant cette date ISO 8601 (optionnel)' }
+        },
+        required: ['query']
+      },
+      execute: async (params) => {
+        try {
+          let events: any[] = [];
+
+          // Recherche vectorielle si embedding disponible
+          if (embeddingFn) {
+            const queryVector = await embeddingFn(params.query);
+            const vectorResults = await calendarClient.vectorSearch(queryVector, 0.3);
+            events = vectorResults;
+          }
+
+          // Fallback texte si vectoriel donne rien
+          if (events.length === 0) {
+            const textResult = await calendarClient.searchEvents(params.query, 20);
+            events = textResult.events as any[];
+          }
+
+          // Filtrage par date optionnel
+          if (params.date_min || params.date_max) {
+            const min = params.date_min ? new Date(params.date_min) : null;
+            const max = params.date_max ? new Date(params.date_max) : null;
+            events = events.filter((ev: any) => {
+              const d = new Date(ev.start.dateTime || ev.start.date || 0);
+              if (min && d < min) return false;
+              if (max && d > max) return false;
+              return true;
+            });
+          }
+
+          const formatted = events.slice(0, 10).map((ev: any, i: number) => {
+            const d = new Date(ev.start.dateTime || ev.start.date || 0);
+            const dateStr = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+            const timeStr = ev.start.dateTime ? ` à ${d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}` : '';
+            return `${i + 1}. [id:${ev.id}] ${ev.summary} — ${dateStr}${timeStr}`;
+          }).join('\n');
+
+          return {
+            success: true,
+            count: events.length,
+            events: events.slice(0, 10).map((ev: any) => ({
+              id: ev.id, summary: ev.summary,
+              start: ev.start.dateTime || ev.start.date
+            })),
+            formatted: events.length === 0
+              ? `Aucun événement trouvé pour "${params.query}".`
+              : formatted
+          };
+        } catch (e: any) {
+          return { success: false, error: e.message };
+        }
+      }
+    });
+
+    // ── agenda_create ─────────────────────────────────────────────────────────
+    this.tools.set('agenda_create', {
+      name: 'agenda_create',
+      description: 'Crée un nouvel événement dans l\'agenda. Tous les champs date/heure doivent être au format ISO 8601.',
+      parameters: {
+        type: 'object',
+        properties: {
+          summary:     { type: 'string', description: 'Titre / libellé de l\'événement' },
+          start:       { type: 'string', description: 'Début ISO 8601 (ex: 2026-03-05T14:00:00)' },
+          end:         { type: 'string', description: 'Fin ISO 8601 (ex: 2026-03-05T15:00:00). Si absent, défaut = start + 1h.' },
+          description: { type: 'string', description: 'Description (optionnel)' },
+          location:    { type: 'string', description: 'Lieu (optionnel)' },
+          force:       { type: 'boolean', description: 'Si true, crée même si un autre événement existe déjà à cette heure (après confirmation utilisateur).' }
+        },
+        required: ['summary', 'start']
+      },
+      execute: async (params) => {
+        try {
+          let end = params.end;
+          if (!end) {
+            const d = new Date(params.start);
+            d.setHours(d.getHours() + 1);
+            end = d.toISOString().slice(0, 19);
+          }
+          const result = await calendarClient.createEvent(
+            params.summary, params.start, end, params.description, params.location, params.force === true
+          );
+          if ('conflict' in result) {
+            return { success: false, conflict: true, conflicting: result.conflicting };
+          }
+          const d = new Date(params.start);
+          return {
+            success: true,
+            event_id: result.event.id,
+            formatted: result.formatted,
+            showCalendar: { year: d.getFullYear(), month: d.getMonth() + 1 }
+          };
+        } catch (e: any) {
+          return { success: false, error: e.message };
+        }
+      }
+    });
+
+    // ── agenda_update ─────────────────────────────────────────────────────────
+    this.tools.set('agenda_update', {
+      name: 'agenda_update',
+      description: 'Modifie un événement existant par son ID. Utilise agenda_search pour obtenir l\'event_id avant d\'appeler cet outil.',
+      parameters: {
+        type: 'object',
+        properties: {
+          event_id:    { type: 'string', description: 'ID de l\'événement (obtenu via agenda_search)' },
+          summary:     { type: 'string', description: 'Nouveau titre (optionnel)' },
+          start:       { type: 'string', description: 'Nouvelle date/heure de début ISO 8601 (optionnel)' },
+          end:         { type: 'string', description: 'Nouvelle date/heure de fin ISO 8601 (optionnel)' },
+          description: { type: 'string', description: 'Nouvelle description (optionnel)' },
+          location:    { type: 'string', description: 'Nouveau lieu (optionnel)' }
+        },
+        required: ['event_id']
+      },
+      execute: async (params) => {
+        try {
+          const { event_id, ...updates } = params;
+          const result = await calendarClient.updateEvent(event_id, updates);
+          const d = new Date(updates.start || result.event?.start?.dateTime || new Date());
+          return {
+            success: true,
+            formatted: result.formatted,
+            showCalendar: { year: d.getFullYear(), month: d.getMonth() + 1 }
+          };
+        } catch (e: any) {
+          return { success: false, error: e.message };
+        }
+      }
+    });
+
+    // ── agenda_delete ─────────────────────────────────────────────────────────
+    this.tools.set('agenda_delete', {
+      name: 'agenda_delete',
+      description: 'Supprime un ou plusieurs événements par leur(s) ID. Utilise agenda_search pour obtenir les event_id. Demande TOUJOURS confirmation à l\'utilisateur avant d\'appeler cet outil. Pour supprimer plusieurs événements en une fois, utilise event_ids (tableau).',
+      parameters: {
+        type: 'object',
+        properties: {
+          event_id:  { type: 'string', description: 'ID d\'un seul événement à supprimer' },
+          event_ids: { type: 'array', items: { type: 'string' }, description: 'Liste d\'IDs d\'événements à supprimer en une seule opération (préféré pour les suppressions multiples)' }
+        }
+      },
+      execute: async (params) => {
+        try {
+          const now = new Date();
+          const calAction = { year: now.getFullYear(), month: now.getMonth() + 1 };
+
+          // Batch delete (event_ids array)
+          if (Array.isArray(params.event_ids) && params.event_ids.length > 0) {
+            const { deleted, notFound } = await calendarClient.deleteEvents(params.event_ids);
+            const lines = [
+              deleted.length  > 0 ? `✅ ${deleted.length} événement(s) supprimé(s).` : '',
+              notFound.length > 0 ? `⚠️ ${notFound.length} ID(s) introuvable(s) : ${notFound.join(', ')}` : ''
+            ].filter(Boolean).join('\n');
+            return { success: true, formatted: lines, showCalendar: calAction };
+          }
+
+          // Single delete (event_id string)
+          if (params.event_id) {
+            const msg = await calendarClient.deleteEvent(params.event_id);
+            return { success: true, formatted: msg, showCalendar: calAction };
+          }
+
+          return { success: false, error: 'Paramètre "event_id" ou "event_ids" requis.' };
+        } catch (e: any) {
+          return { success: false, error: e.message };
+        }
+      }
+    });
+
+    // ── show_calendar (UI) ────────────────────────────────────────────────────
+    this.tools.set('show_calendar', {
+      name: 'show_calendar',
+      description: 'Affiche la vue graphique mensuelle de l\'agenda dans l\'interface. À utiliser quand l\'utilisateur demande à voir/afficher son agenda.',
+      parameters: {
+        type: 'object',
+        properties: {
+          year:  { type: 'number', description: 'Année (défaut: année courante)' },
+          month: { type: 'number', description: 'Mois 1-12 (défaut: mois courant)' }
+        },
+        required: []
+      },
+      execute: async (params) => {
+        const year  = params.year  || new Date().getFullYear();
+        const month = params.month || (new Date().getMonth() + 1);
+        const tMin = new Date(year, month - 1, 1).toISOString();
+        const tMax = new Date(year, month, 1).toISOString();
+        const result = await calendarClient.getEvents(100, tMin, tMax);
+        const monthName = new Date(year, month - 1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+        return {
+          success: true,
+          showCalendar: { year, month },
+          count: result.events.length,
+          // formatted contient le détail complet pour que le LLM s'en souvienne
+          formatted: result.formatted
+        };
       }
     });
   }

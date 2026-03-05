@@ -14,7 +14,13 @@ export class ConversationMemory {
   }
 
   addMessage(role: 'user' | 'assistant', content: string) {
-    this.messages.push({ role, content });
+    const last = this.messages[this.messages.length - 1];
+    if (last && last.role === role) {
+      // Merge consecutive same-role messages to preserve alternation
+      last.content += '\n' + content;
+    } else {
+      this.messages.push({ role, content });
+    }
 
     if (this.messages.length > this.maxMessages) {
       this.messages = this.messages.slice(-this.maxMessages);

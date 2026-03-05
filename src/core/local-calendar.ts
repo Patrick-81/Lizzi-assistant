@@ -15,9 +15,32 @@ export interface LocalEvent {
   end: { dateTime?: string; date?: string };
   created: string;
   updated: string;
+  embedding?: number[];
 }
 
-function formatEvent(ev: LocalEvent): string {
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0, ma = 0, mb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; ma += a[i]*a[i]; mb += b[i]*b[i]; }
+  const denom = Math.sqrt(ma) * Math.sqrt(mb);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Texte représentatif d'un événement pour l'embedding */
+function eventEmbeddingText(ev: LocalEvent): string {
+  const raw = ev.start.dateTime || ev.start.date || '';
+  const d = raw ? new Date(raw) : null;
+  const dateStr = d
+    ? d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+    : '';
+  const timeStr = ev.start.dateTime && d
+    ? d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+    : '';
+  return [ev.summary, dateStr, timeStr, ev.description, ev.location]
+    .filter(Boolean).join(' ');
+}
+
+function formatEvent(ev: LocalEvent, index?: number): string {
   const startRaw = ev.start.dateTime || ev.start.date || '?';
   const endRaw   = ev.end.dateTime   || ev.end.date   || '?';
   const isAllDay = !ev.start.dateTime;
@@ -28,10 +51,10 @@ function formatEvent(ev: LocalEvent): string {
     ? start.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
     : `${start.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })} à ${start.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} - ${end.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`;
 
-  let out = `📅 ${ev.summary}\n   🕐 ${dateStr}`;
+  const prefix = index !== undefined ? `${index}. ` : '';
+  let out = `${prefix}📅 ${ev.summary}\n   🕐 ${dateStr}`;
   if (ev.location)    out += `\n   📍 ${ev.location}`;
   if (ev.description) out += `\n   📝 ${ev.description.substring(0, 100)}`;
-  out += `\n   🆔 ${ev.id}`;
   return out;
 }
 
@@ -43,6 +66,19 @@ export class LocalCalendarClient {
   private events: LocalEvent[] = [];
   private loaded = false;
   private saveLock: Promise<void> = Promise.resolve();
+  private embeddingFn?: (text: string) => Promise<number[]>;
+
+  /** Optionnel : injecter la fonction d'embedding après construction */
+  setEmbeddingFn(fn: (text: string) => Promise<number[]>) {
+    this.embeddingFn = fn;
+  }
+
+  private async generateEmbedding(ev: LocalEvent): Promise<void> {
+    if (!this.embeddingFn) return;
+    try {
+      ev.embedding = await this.embeddingFn(eventEmbeddingText(ev));
+    } catch { /* embedding échoue silencieusement */ }
+  }
 
   async initialize(): Promise<boolean> {
     try {
@@ -70,6 +106,12 @@ export class LocalCalendarClient {
   }
 
   async getEvents(maxResults = 10, timeMin?: string, timeMax?: string): Promise<{ events: LocalEvent[]; formatted: string }> {
+    // Relit le fichier pour avoir les données fraîches (plusieurs instances possibles)
+    try {
+      const raw = await fs.readFile(CALENDAR_PATH, 'utf-8');
+      this.events = JSON.parse(raw);
+    } catch { /* si le fichier n'existe pas encore, on garde this.events */ }
+
     let filtered = [...this.events];
 
     if (timeMin) {
@@ -97,7 +139,7 @@ export class LocalCalendarClient {
     filtered = filtered.slice(0, maxResults);
     const formatted = filtered.length === 0
       ? 'Aucun événement trouvé.'
-      : filtered.map(formatEvent).join('\n\n');
+      : filtered.map((ev, i) => formatEvent(ev, i + 1)).join('\n\n');
     return { events: filtered, formatted };
   }
 
@@ -114,14 +156,34 @@ export class LocalCalendarClient {
 
     const formatted = matches.length === 0
       ? `Aucun événement trouvé pour "${query}".`
-      : matches.map(formatEvent).join('\n\n');
+      : matches.map((ev, i) => formatEvent(ev, i + 1)).join('\n\n');
     return { events: matches, formatted };
+  }
+
+  /** Retourne les événements dont la plage horaire chevauche [start, end). */
+  findConflicts(start: string, end: string, excludeId?: string): LocalEvent[] {
+    const s = new Date(start).getTime();
+    const e = new Date(end).getTime();
+    return this.events.filter(ev => {
+      if (excludeId && ev.id === excludeId) return false;
+      const evS = new Date(ev.start.dateTime || ev.start.date || 0).getTime();
+      const evE = new Date(ev.end.dateTime   || ev.end.date   || 0).getTime();
+      return s < evE && e > evS; // chevauchement
+    });
   }
 
   async createEvent(
     summary: string, start: string, end: string,
-    description?: string, location?: string
-  ): Promise<{ event: LocalEvent; formatted: string }> {
+    description?: string, location?: string,
+    force = false
+  ): Promise<{ event: LocalEvent; formatted: string } | { conflict: true; conflicting: string }> {
+    if (!force) {
+      const conflicts = this.findConflicts(start, end);
+      if (conflicts.length > 0) {
+        const list = conflicts.map(formatEvent).join('\n\n');
+        return { conflict: true, conflicting: list };
+      }
+    }
     const now = new Date().toISOString();
     const ev: LocalEvent = {
       id: randomUUID(),
@@ -133,6 +195,7 @@ export class LocalCalendarClient {
       created: now,
       updated: now
     };
+    await this.generateEmbedding(ev);
     this.events.push(ev);
     await this.save();
     return { event: ev, formatted: `✅ Événement créé !\n${formatEvent(ev)}` };
@@ -153,8 +216,23 @@ export class LocalCalendarClient {
     if (updates.end         !== undefined) ev.end         = toDateTime(updates.end);
     ev.updated = new Date().toISOString();
 
+    await this.generateEmbedding(ev); // regénère l'embedding si summary ou date change
     await this.save();
     return { event: ev, formatted: `✅ Événement mis à jour !\n${formatEvent(ev)}` };
+  }
+
+  /** Recherche vectorielle sémantique dans l'agenda */
+  async vectorSearch(queryVector: number[], threshold = 0.3): Promise<LocalEvent[]> {
+    const candidates = this.events.filter(ev => ev.embedding && ev.embedding.length > 0);
+    if (candidates.length === 0) return [];
+    const scored = candidates.map(ev => ({
+      ev,
+      score: cosineSimilarity(queryVector, ev.embedding!)
+    }));
+    return scored
+      .filter(s => s.score >= threshold)
+      .sort((a, b) => b.score - a.score)
+      .map(s => s.ev);
   }
 
   async deleteEvent(eventId: string): Promise<string> {
@@ -163,5 +241,21 @@ export class LocalCalendarClient {
     this.events.splice(idx, 1);
     await this.save();
     return `✅ Événement [${eventId}] supprimé.`;
+  }
+
+  /** Supprime plusieurs événements en une seule opération atomique. */
+  async deleteEvents(eventIds: string[]): Promise<{ deleted: string[]; notFound: string[] }> {
+    const idSet = new Set(eventIds);
+    const deleted: string[] = [];
+    const notFound: string[] = [];
+
+    for (const id of eventIds) {
+      if (this.events.some(e => e.id === id)) deleted.push(id);
+      else notFound.push(id);
+    }
+
+    this.events = this.events.filter(e => !idSet.has(e.id));
+    await this.save();
+    return { deleted, notFound };
   }
 }
